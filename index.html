@@ -251,7 +251,7 @@
                 </div>
                 <div class="bg-gray-950/60 p-2 rounded-lg border border-gray-800">
                     <div class="text-[10px] text-gray-400">SPEED</div>
-                    <div id="userSpdVal" class="text-sm font-bold text-cyan-300 mono">63,000 KT</div>
+                    <div id="userSpdVal" class="text-sm font-bold text-cyan-300 mono">450 KT</div>
                 </div>
             </div>
 
@@ -465,7 +465,7 @@
     </div>
 
     <!-- FIREBASE & MULTIPLAYER LOGIC -->
-    <script type="module">
+    <script type="module">        
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, setDoc, onSnapshot, collection, deleteDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
@@ -508,49 +508,17 @@
         let verifiedServerPassword = false;
         let verifiedAtcPassword = false;
         let verifiedFighterPassword = false;
-        // 마스터키 원문은 코드에 저장하지 않습니다.
-        // Firebase Firestore: access_control / security / masterHash
-        const MASTER_HASH_DOC_PATH = ['access_control', 'security'];
-        const MASTER_HASH_FIELD = 'masterHash';
         const PASSWORD_DOC_PATH = ['access_control', 'passwords'];
+        // 마스터 키 원문은 코드에 저장하지 않습니다.
+        // Firestore의 access_control/security.masterHash와 Rules를 통해 검증합니다.
+        const MASTER_SECURITY_DOC_PATH = ['access_control', 'security'];
+        const MASTER_VERIFY_COLLECTION = 'masterKeyChecks';
+        let masterVerifiedThisSession = false;
         let playersUnsubscribe = null;
         const PRESENCE_TIMEOUT_MS = 12000;
 
         function getPasswordDocRef() {
             return doc(db, ...PASSWORD_DOC_PATH);
-        }
-
-        function getMasterHashDocRef() {
-            return doc(db, ...MASTER_HASH_DOC_PATH);
-        }
-
-        async function sha256Hex(value) {
-            const normalized = String(value || '').trim().toLowerCase();
-            const data = new TextEncoder().encode(normalized);
-            const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-            return Array.from(new Uint8Array(hashBuffer))
-                .map(byte => byte.toString(16).padStart(2, '0'))
-                .join('');
-        }
-
-        async function verifyMasterCodeFromFirebase(masterInput) {
-            if (!db || !auth || !auth.currentUser || !firebaseReady) {
-                throw new Error('Firebase 인증이 아직 완료되지 않았습니다.');
-            }
-
-            const ref = getMasterHashDocRef();
-            const snap = await getDoc(ref);
-            if (!snap.exists()) {
-                throw new Error('Firebase에 masterHash가 없습니다. access_control/security 문서를 확인하세요.');
-            }
-
-            const savedHash = String((snap.data() || {})[MASTER_HASH_FIELD] || '').trim().toLowerCase();
-            if (!savedHash) {
-                throw new Error('Firebase의 masterHash 값이 비어 있습니다.');
-            }
-
-            const enteredHash = await sha256Hex(masterInput);
-            return enteredHash === savedHash;
         }
 
         // Local Simulation State for My Aircraft (if Pilot)
@@ -559,6 +527,14 @@
 
         function getCruiseSpeedForAircraft(type = myAircraftType) {
             return type === 'FIGHTER' ? FIGHTER_CRUISE_SPEED_KT : AIRLINER_CRUISE_SPEED_KT;
+        }
+
+        // 실제 이동 속도는 그대로 유지하고 계기에는 현실적인 표시값을 보여줍니다.
+        // AIRLINER 45,000 -> 450 KT / FIGHTER 63,000 -> 630 KT
+        const DISPLAY_SPEED_DIVISOR = 100;
+        function getDisplayedSpeedKt(physicalSpeedKt) {
+            const value = Number(physicalSpeedKt) || 0;
+            return Math.max(0, Math.round(value / DISPLAY_SPEED_DIVISOR));
         }
 
         let myAircraft = {
@@ -653,6 +629,8 @@
                 myAircraft.speed = getCruiseSpeedForAircraft(type);
                 myAircraft.targetSpeed = getCruiseSpeedForAircraft(type);
             }
+            const spdEl = document.getElementById('userSpdVal');
+            if (spdEl) spdEl.innerText = `${getDisplayedSpeedKt(myAircraft.speed)} KT`;
             const civil = document.getElementById('typeBtnCivil');
             const fighter = document.getElementById('typeBtnFighter');
             if (type === 'FIGHTER') {
@@ -766,6 +744,11 @@
             return ((lng + 180) % 360 + 360) % 360 - 180;
         }
 
+        // MapTiler API 키를 여기에 넣으세요.
+        // 웹 앱에서는 키가 브라우저에 노출되므로 MapTiler에서
+        // Allowed HTTP origins로 게임 주소를 제한하는 것을 권장합니다.
+        const MAPTILER_API_KEY = "${FIYC_API_KEY}";
+
         function initMap() {
             map = L.map('map', {
                 center: [36.5, 127.8],
@@ -775,11 +758,13 @@
                 attributionControl: true
             });
 
-            L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-                subdomains: 'abcd',
+            L.tileLayer(`https://api.maptiler.com/maps/dataviz-dark/{z}/{x}/{y}.png?key=${encodeURIComponent(MAPTILER_API_KEY)}`, {
+                tileSize: 512,
+                zoomOffset: -1,
                 maxZoom: 14,
-                minZoom: 4,
-                attribution: '&copy; OpenStreetMap &copy; CARTO'
+                minZoom: 1,
+                attribution: '&copy; MapTiler &copy; OpenStreetMap contributors',
+                crossOrigin: true
             }).addTo(map);
 
             L.control.zoom({ position: 'bottomleft' }).addTo(map);
@@ -847,7 +832,7 @@
                 }
 
                 myUserId = credential.user.uid;
-                // 인증이 끝난 뒤 Firestore의 최신 암호를 반드시 먼저 읽습니다.
+                // 일반 게임용 접근 암호만 읽습니다. 마스터키 원문/해시는 읽지 않습니다.
                 await loadAccessPasswords();
                 firebaseReady = true;
                 firebaseInitError = null;
@@ -1108,7 +1093,7 @@
             // Update Pilot HUD telemetry
             document.getElementById('userAltVal').innerText = `${Math.round(myAircraft.alt).toLocaleString()} FT`;
             document.getElementById('userHdgVal').innerText = `${Math.round(myAircraft.heading).toString().padStart(3, '0')}°`;
-            document.getElementById('userSpdVal').innerText = `${Math.round(myAircraft.speed)} KT`;
+            document.getElementById('userSpdVal').innerText = `${getDisplayedSpeedKt(myAircraft.speed)} KT`;
         }
 
         function moveGreatCircle(aircraft, distanceNm, bearingDeg) {
@@ -1168,7 +1153,7 @@
                         <div class="font-bold flex items-center gap-1">
                             ${pData.id} [${typeLabel}] ${pData.isLanded ? '<span class="text-gray-400">LANDED</span>' : ''} ${pData.isEmergency ? '<span class="text-red-500 font-black animate-ping">!</span>' : ''}
                         </div>
-                        <div>ALT ${Math.round(pData.alt || 0).toLocaleString()} FT • FL${Math.round((pData.alt || 0) / 100)} • ${Math.round(pData.speed || 0)}kt</div>
+                        <div>ALT ${Math.round(pData.alt || 0).toLocaleString()} FT • FL${Math.round((pData.alt || 0) / 100)} • ${getDisplayedSpeedKt(pData.speed || 0)}kt</div>
                     </div>
                 </div>
             `;
@@ -1272,7 +1257,7 @@
                     <div>현재 고도: <span class="text-cyan-300">${Math.round(target.alt || 0).toLocaleString()} FT</span></div>
                     <div>목표 고도: <span class="text-amber-300">${Math.round(target.targetAlt || target.alt || 0).toLocaleString()} FT</span></div>
                     <div>기수: <span class="text-cyan-300">${Math.round(target.heading)}°</span></div>
-                    <div>속도: <span class="text-cyan-300">${Math.round(target.speed)} KT</span></div>
+                    <div>속도: <span class="text-cyan-300">${getDisplayedSpeedKt(target.speed)} KT</span></div>
                 </div>
             `;
 
@@ -1640,6 +1625,42 @@
             localStorage.setItem('radarAccessPasswordsUpdatedAt', String(updatedAt));
         }
 
+        async function sha256Hex(text) {
+            if (!window.crypto?.subtle) {
+                throw new Error('이 브라우저에서는 보안 해시 기능을 사용할 수 없습니다. HTTPS 또는 localhost에서 실행해 주세요.');
+            }
+            const data = new TextEncoder().encode(String(text));
+            const digest = await window.crypto.subtle.digest('SHA-256', data);
+            return Array.from(new Uint8Array(digest))
+                .map(b => b.toString(16).padStart(2, '0'))
+                .join('');
+        }
+
+        async function verifyMasterKeyViaFirestoreRules(masterInput) {
+            if (masterVerifiedThisSession) return true;
+            if (!db || !auth || !auth.currentUser) {
+                throw new Error('Firebase 인증이 완료되지 않았습니다.');
+            }
+
+            const normalized = String(masterInput ?? '').trim().toLowerCase();
+            if (!normalized) return false;
+
+            // 마스터키 원문은 Firestore로 보내지 않습니다.
+            // SHA-256 결과만 전송하고, Firestore Rules가 비공개 security 문서의
+            // masterHash와 일치하는 경우에만 쓰기를 허용합니다.
+            const hash = await sha256Hex(normalized);
+            const checkRef = doc(db, MASTER_VERIFY_COLLECTION, myUserId);
+
+            try {
+                await setDoc(checkRef, { hash });
+                masterVerifiedThisSession = true;
+                return true;
+            } catch (error) {
+                console.warn('Master key verification rejected:', error);
+                return false;
+            }
+        }
+
         window.changeAccessPasswords = async function() {
             // 암호 변경 버튼은 게임 접속 전에도 사용할 수 있으므로
             // Firebase 인증/초기화를 먼저 완료합니다.
@@ -1661,16 +1682,14 @@
             const master = prompt('암호 변경을 위한 마스터 코드를 입력하세요.');
             if (master === null) return;
 
+            let masterOk = false;
             try {
-                const verified = await verifyMasterCodeFromFirebase(master);
-                if (!verified) {
-                    alert('마스터 코드가 올바르지 않습니다.');
-                    return;
-                }
+                masterOk = await verifyMasterKeyViaFirestoreRules(master);
             } catch (e) {
-                console.error('Master hash verification failed:', e);
-                const code = e?.code ? `\n오류 코드: ${e.code}` : '';
-                alert(`마스터키 확인에 실패했습니다.${code}\n\n${e?.message || e}`);
+                console.error('Master key verification error:', e);
+            }
+            if (!masterOk) {
+                alert('마스터 코드가 올바르지 않거나 Firebase 보안 규칙이 아직 설정되지 않았습니다.');
                 return;
             }
 
