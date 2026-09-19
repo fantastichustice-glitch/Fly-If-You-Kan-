@@ -1,0 +1,1769 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multiplayer Radar Flight Simulator - Shared Airspace</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Leaflet CSS & JS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Inter:wght@300;400;600;700&display=swap');
+        
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            font-family: 'Inter', sans-serif;
+            background-color: #050811;
+            color: #d1d5db;
+        }
+
+        .mono {
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        /* Dark Radar Leaflet Map Override */
+        #map {
+            width: 100vw;
+            height: 100vh;
+            background-color: #030712;
+            z-index: 0;
+        }
+
+        .leaflet-container {
+            background-color: #030712 !important;
+        }
+
+        .leaflet-control-attribution {
+            background: rgba(3, 7, 18, 0.8) !important;
+            color: #4b5563 !important;
+            font-size: 10px;
+        }
+
+        /* Radar Grid Overlay effect */
+        .radar-grid {
+            pointer-events: none;
+            position: absolute;
+            inset: 0;
+            z-index: 10;
+            background: radial-gradient(circle, transparent 20%, rgba(3, 7, 18, 0.4) 90%),
+                        linear-gradient(to right, rgba(0, 243, 255, 0.03) 1px, transparent 1px),
+                        linear-gradient(to bottom, rgba(0, 243, 255, 0.03) 1px, transparent 1px);
+            background-size: 100% 100%, 50px 50px, 50px 50px;
+        }
+
+        /* Custom Glassmorphism UI Panels */
+        .glass-panel {
+            background: rgba(10, 16, 31, 0.85);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(0, 243, 255, 0.15);
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.5);
+        }
+
+        /* Radar Sweep Animation */
+        @keyframes sweep {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .radar-sweeper {
+            position: absolute;
+            width: 200vmax;
+            height: 200vmax;
+            top: 50%;
+            left: 50%;
+            margin-top: -100vmax;
+            margin-left: -100vmax;
+            border-radius: 50%;
+            background: conic-gradient(from 0deg, rgba(0, 255, 102, 0.08) 0deg, rgba(0, 255, 102, 0.01) 30deg, transparent 60deg);
+            pointer-events: none;
+            z-index: 5;
+            animation: sweep 12s linear infinite;
+        }
+
+        /* Scrollbar Styling */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: rgba(5, 8, 17, 0.6);
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(0, 243, 255, 0.25);
+            border-radius: 3px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(0, 243, 255, 0.5);
+        }
+
+        /* Pulsing status dots */
+        .pulse-green {
+            box-shadow: 0 0 0 0 rgba(0, 255, 102, 0.7);
+            animation: pulse-green 2s infinite;
+        }
+        @keyframes pulse-green {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(0, 255, 102, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 8px rgba(0, 255, 102, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(0, 255, 102, 0); }
+        }
+    </style>
+</head>
+<body class="select-none overflow-hidden">
+    
+    <!-- Radar Sweep Background Visualizer -->
+    <div class="radar-sweeper"></div>
+    <div class="radar-grid"></div>
+
+    <!-- Leaflet Map Container -->
+    <div id="map"></div>
+
+    <!-- INITIAL CONNECTION MODAL -->
+    <div id="setupModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4">
+        <div class="glass-panel w-full max-w-md rounded-2xl p-6 border border-cyan-500/40 flex flex-col gap-4 shadow-2xl">
+            <div class="flex items-center gap-3 border-b border-gray-800 pb-3">
+                <div class="w-3.5 h-3.5 rounded-full bg-cyan-400 pulse-green"></div>
+                <div>
+                    <h2 class="text-base font-bold text-cyan-400 mono">멀티플레이어 관제/비행 접속</h2>
+                    <p class="text-xs text-gray-400">동일한 링크로 접속한 친구들과 함께 실시간 공유됩니다.</p>
+                </div>
+            </div>
+
+            <div class="space-y-3">
+                <div>
+                    <label class="text-xs font-medium text-gray-300 mb-1 block">내 호출부호 (Callsign / ID):</label>
+                    <input type="text" id="inputCallsign" value="KAL101" maxlength="8"
+                        class="w-full bg-gray-950 text-cyan-300 border border-cyan-500/40 rounded-lg px-3 py-2 text-sm font-mono uppercase tracking-wider focus:outline-none focus:border-cyan-400">
+                </div>
+
+                <div>
+                    <label class="text-xs font-medium text-gray-300 mb-1 block">광역 접속 서버:</label>
+                    <select id="inputServer" class="w-full bg-gray-950 text-cyan-300 border border-cyan-500/40 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-cyan-400">
+                        <option value="GLOBAL">GLOBAL</option>
+                        <option value="GLOBAL-2">GLOBAL-2</option>
+                        <option value="GLOBAL-3">GLOBAL-3</option>
+                        <option value="AIR_FORCE_TRAINING">공군 훈련 🔒</option>
+                        <option value="ATC_TRAINING">관제 훈련 🔒</option>
+                        <option value="FLIGHT_TRAINING">비행 훈련 🔒</option>
+                    </select>
+                    <button type="button" onclick="changeAccessPasswords()" class="mt-1.5 w-full py-1.5 bg-red-600/10 hover:bg-red-600/20 text-red-300 border border-red-500/30 rounded-lg text-[10px] font-bold">
+                        <i class="fa-solid fa-key mr-1"></i> 암호 변경 (마스터)
+                    </button>
+                </div>
+
+                <div>
+                    <label class="text-xs font-medium text-gray-300 mb-1 block">관제 번호 (같은 번호끼리만 통신):</label>
+                    <input type="text" id="inputAtcChannel" value="120.5" maxlength="12"
+                        class="w-full bg-gray-950 text-amber-300 border border-amber-500/40 rounded-lg px-3 py-2 text-sm font-mono tracking-wider focus:outline-none focus:border-amber-400">
+                </div>
+
+                <div id="aircraftTypeBox">
+                    <label class="text-xs font-medium text-gray-300 mb-1 block">기체:</label>
+                    <div class="grid grid-cols-2 gap-2">
+                        <button type="button" id="typeBtnCivil" onclick="selectAircraftType('AIRLINER')" class="py-2 bg-cyan-600 text-white rounded-lg text-xs font-bold border border-cyan-400">✈️ 일반기</button>
+                        <button type="button" id="typeBtnFighter" onclick="selectAircraftType('FIGHTER')" class="py-2 bg-gray-900 text-gray-400 rounded-lg text-xs font-bold border border-gray-800">🛩️ 전투기</button>
+                    </div>
+                </div>
+
+                <div>
+                    <label class="text-xs font-medium text-gray-300 mb-1 block">접속 모드 (Role):</label>
+                    <div class="grid grid-cols-2 gap-2">
+                        <button type="button" id="roleBtnPilot" onclick="selectRole('PILOT')" 
+                            class="py-2.5 px-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-2 bg-cyan-600 text-white shadow-lg border border-cyan-400">
+                            <i class="fa-solid fa-plane"></i> 조종사 (Pilot)
+                        </button>
+                        <button type="button" id="roleBtnATC" onclick="selectRole('ATC')" 
+                            class="py-2.5 px-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-2 bg-gray-900 text-gray-400 border border-gray-800 hover:text-white">
+                            <i class="fa-solid fa-headset"></i> 관제사 (ATC)
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <button onclick="startMultiplayerSession()" class="mt-2 w-full py-3 bg-gradient-to-r from-cyan-600 to-emerald-600 hover:from-cyan-500 hover:to-emerald-500 text-white font-bold text-sm rounded-xl shadow-lg transition flex items-center justify-center gap-2">
+                <i class="fa-solid fa-satellite-dish"></i> 멀티플레이어 공역 접속 시작
+            </button>
+        </div>
+    </div>
+
+    <!-- TOP HEADER / NAVBAR -->
+    <header class="fixed top-3 left-3 right-3 z-30 flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl glass-panel border border-cyan-500/20">
+        <!-- Title & Status -->
+        <div class="flex items-center gap-3">
+            <div id="connStatusDot" class="w-3 h-3 rounded-full bg-emerald-400 pulse-green"></div>
+            <div>
+                <h1 class="text-base font-bold tracking-wider text-cyan-400 mono flex items-center gap-2">
+                    <i class="fa-solid font-bold fa-radar"></i> SHARED AIRSPACE RADAR
+                </h1>
+                <p class="text-xs text-gray-400">서버: <span id="serverDisplay" class="text-cyan-300 font-semibold">GLOBAL</span> • 관제: <span id="channelDisplay" class="text-amber-300 font-semibold">120.5</span> • 접속자: <span id="myCallsignDisplay" class="text-cyan-300 font-semibold">---</span> (<span id="myRoleDisplay" class="text-emerald-400 font-semibold">PILOT</span>) • 온라인 플레이어: <span id="onlineCount" class="text-cyan-300 font-semibold mono">1</span>명</p>
+                <div class="mt-1 flex items-center gap-2">
+                    <button onclick="changeAtcChannel()" class="px-2 py-1 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded text-[10px] font-bold transition">
+                        <i class="fa-solid fa-radio mr-1"></i>통신 ID 변경
+                    </button>
+                    <button onclick="changeAccessPasswords()" class="px-2 py-1 bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-red-500/30 rounded text-[10px] font-bold transition">
+                        <i class="fa-solid fa-key mr-1"></i>암호 변경
+                    </button>
+                    <span class="text-[10px] text-gray-500">같은 서버 + 같은 통신 ID끼리만 통신</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Time Warp (Max 100x) & Guide -->
+        <div class="flex items-center gap-4">
+            <!-- ATC Phraseology Guide Button -->
+            <button onclick="toggleModal('atcGuideModal')" class="px-3 py-1.5 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 rounded-lg text-xs font-medium transition flex items-center gap-1.5">
+                <i class="fa-solid fa-book-bookmark"></i> 📖 관제 명령어 가이드
+            </button>
+        </div>
+    </header>
+
+    <!-- LEFT PANEL: PILOT HUD / ATC CONTROL PANEL -->
+    <aside class="fixed top-20 left-3 z-20 w-80 max-h-[calc(100vh-6rem)] flex flex-col gap-3">
+        
+        <!-- PILOT MODE HUD -->
+        <div id="pilotControlPanel" class="glass-panel rounded-xl p-4 flex flex-col gap-3">
+            <div class="flex items-center justify-between border-b border-gray-800 pb-2">
+                <div class="flex items-center gap-2">
+                    <i class="fa-solid fa-plane-departure text-cyan-400"></i>
+                    <span id="pilotTitleCallsign" class="font-bold text-sm text-cyan-200 mono">MY AIRCRAFT</span>
+                </div>
+                <span id="userStatusBadge" class="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-mono">LIVE SYNC</span>
+            </div>
+
+            <!-- Telemetry Display -->
+            <div class="grid grid-cols-3 gap-2 text-center">
+                <div class="bg-gray-950/60 p-2 rounded-lg border border-gray-800">
+                    <div class="text-[10px] text-gray-400">ALTITUDE</div>
+                    <div id="userAltVal" class="text-sm font-bold text-cyan-300 mono">12,000 FT</div>
+                </div>
+                <div class="bg-gray-950/60 p-2 rounded-lg border border-gray-800">
+                    <div class="text-[10px] text-gray-400">HEADING</div>
+                    <div id="userHdgVal" class="text-sm font-bold text-cyan-300 mono">090°</div>
+                </div>
+                <div class="bg-gray-950/60 p-2 rounded-lg border border-gray-800">
+                    <div class="text-[10px] text-gray-400">SPEED</div>
+                    <div id="userSpdVal" class="text-sm font-bold text-cyan-300 mono">63,000 KT</div>
+                </div>
+            </div>
+
+            <!-- Pilot Altitude Control -->
+            <div class="bg-gray-950/50 p-2.5 rounded-lg border border-cyan-500/20">
+                <div class="flex justify-between items-center mb-1.5">
+                    <span class="text-[11px] text-gray-400">고도 설정</span>
+                    <span id="pilotTargetAltVal" class="text-[11px] text-cyan-300 font-mono">목표 12,000 FT</span>
+                </div>
+                <div class="flex gap-1.5">
+                    <button onclick="adjustPilotAltitude(-1000)" class="px-2 bg-gray-800 hover:bg-gray-700 text-xs rounded border border-gray-700 text-gray-200">-1k</button>
+                    <input type="number" id="pilotAltInput" step="500" min="0" max="60000" placeholder="FT" class="flex-1 bg-gray-900 border border-gray-700 rounded text-center text-xs text-white font-mono py-1">
+                    <button onclick="adjustPilotAltitude(1000)" class="px-2 bg-gray-800 hover:bg-gray-700 text-xs rounded border border-gray-700 text-gray-200">+1k</button>
+                    <button onclick="setPilotAltitude()" class="bg-cyan-600/20 hover:bg-cyan-600/40 text-cyan-300 border border-cyan-500/30 rounded text-xs font-semibold px-3 py-1">설정</button>
+                </div>
+            </div>
+
+            <!-- Navigation Helper Info -->
+            <div class="text-xs text-gray-400 bg-gray-900/50 p-2.5 rounded-lg border border-gray-800 space-y-1">
+                <div class="flex justify-between">
+                    <span>다음 항로 웨이포인트:</span>
+                    <span id="userNextWpt" class="text-cyan-400 font-mono font-semibold">DIRECT HEADING</span>
+                </div>
+                <p class="text-[11px] text-gray-400 italic">💡 지도를 클릭하면 해당 위치로 무한 직진 항로 웨이포인트가 추가됩니다.</p>
+            </div>
+
+            <!-- Waypoint Actions -->
+            <div id="flightActionPanel" class="grid grid-cols-2 gap-2">
+                <button id="btnLanding" onclick="toggleLanding()" class="py-2 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 text-xs rounded-lg border border-emerald-500/40 font-semibold">
+                    <i class="fa-solid fa-plane-arrival mr-1"></i> 착륙 / 정지
+                </button>
+                <button id="btnAttack" onclick="attackTarget()" class="py-2 bg-red-600/20 hover:bg-red-600/30 text-red-300 text-xs rounded-lg border border-red-500/40 font-semibold hidden">
+                    <i class="fa-solid fa-crosshairs mr-1"></i> 전투기 공격
+                </button>
+            </div>
+
+            <div id="combatTargetInfo" class="text-[11px] text-gray-500 bg-gray-950/50 rounded-lg border border-gray-800 p-2 hidden">공격 대상: <span id="combatTargetName" class="text-red-300 font-mono">미선택</span>
+            </div>
+
+            <div class="flex gap-2">
+                <button onclick="clearUserWaypoints()" class="flex-1 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 text-xs rounded-lg transition font-medium border border-gray-700">
+                    <i class="fa-solid fa-trash-can mr-1"></i> 웨이포인트 초기화
+                </button>
+                <button id="btnEmergencyTrigger" onclick="toggleUserEmergency()" class="py-1.5 px-3 bg-red-600/20 hover:bg-red-600/30 text-red-400 text-xs rounded-lg transition font-medium border border-red-500/40 flex items-center gap-1">
+                    <i class="fa-solid fa-triangle-exclamation"></i> SQUAWK 7700
+                </button>
+            </div>
+        </div>
+
+        <!-- CONTROLLER MODE ATC TRACKING & COMMAND PANEL -->
+        <div id="atcControlPanel" class="glass-panel rounded-xl p-4 flex flex-col gap-3 hidden">
+            <div class="flex items-center justify-between border-b border-gray-800 pb-2">
+                <div class="flex items-center gap-2">
+                    <i class="fa-solid fa-headset text-amber-400"></i>
+                    <span class="font-bold text-sm text-amber-200 mono">ATC RADAR CONTROL</span>
+                </div>
+                <span class="text-[10px] px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 font-mono">CONTROLLER</span>
+            </div>
+
+            <!-- Aircraft Search & Select Input -->
+            <div class="relative">
+                <label class="text-[11px] text-gray-400 font-medium mb-1 block">접속 중인 조종사 콜사인 검색/추적:</label>
+                <div class="flex gap-2">
+                    <div class="relative flex-1">
+                        <input type="text" id="atcSearchInput" placeholder="예: KAL101, AAR202..." autocomplete="off"
+                            oninput="onCallsignSearchInput(this.value)"
+                            class="w-full bg-gray-950 text-cyan-300 border border-cyan-500/30 rounded-lg px-3 py-2 text-xs font-mono uppercase tracking-wider focus:outline-none focus:border-cyan-400">
+                        <i class="fa-solid fa-magnifying-glass absolute right-2.5 top-2.5 text-gray-500 text-xs"></i>
+                    </div>
+                    <button onclick="clearTrackedAircraft()" class="px-2 py-1 bg-gray-800 hover:bg-gray-700 text-xs text-gray-400 rounded-lg border border-gray-700" title="추적 해제">
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
+                </div>
+                <!-- Search Suggestions Dropdown -->
+                <div id="atcSearchSuggestions" class="absolute left-0 right-0 top-full mt-1 bg-gray-950/95 border border-cyan-500/30 rounded-lg max-h-36 overflow-y-auto hidden z-50"></div>
+            </div>
+
+            <!-- Tracked Aircraft Display Card -->
+            <div id="trackedAircraftCard" class="bg-gray-950/80 p-3 rounded-xl border border-cyan-500/20 space-y-2">
+                <div class="flex justify-between items-center">
+                    <span id="trackedCallsign" class="font-mono font-bold text-lg text-cyan-400">대상 항공기 미선택</span>
+                    <span id="trackedSquawk" class="text-xs font-mono text-gray-400">SQK: ----</span>
+                </div>
+                <div id="trackedDetailInfo" class="text-xs text-gray-400 space-y-1">
+                    <p>목록에서 조종사를 선택하거나 콜사인을 입력하여 관제 명령을 지시하십시오.</p>
+                </div>
+            </div>
+
+            <!-- Direct ATC Command Interface -->
+            <div id="atcCommandSection" class="space-y-3 opacity-50 pointer-events-none transition-all">
+                <span class="text-[11px] font-bold text-amber-400 uppercase tracking-wider block border-b border-gray-800 pb-1">⚡ 관제 명령 지시 (DIRECT COMMAND)</span>
+
+                <!-- Heading Turn Command -->
+                <div>
+                    <div class="flex justify-between text-xs text-gray-300 mb-1">
+                        <span>기수 변경 (Heading):</span>
+                        <span id="cmdHdgVal" class="font-mono text-amber-300">---°</span>
+                    </div>
+                    <div class="flex gap-1.5">
+                        <input type="number" id="inputHdg" min="1" max="360" placeholder="0-360" class="w-20 bg-gray-900 border border-gray-700 rounded text-center text-xs text-white font-mono py-1">
+                        <button onclick="issueHeadingCommand()" class="flex-1 bg-amber-600/30 hover:bg-amber-600/50 text-amber-200 border border-amber-500/40 rounded text-xs font-semibold py-1">
+                            기수 지시
+                        </button>
+                        <button onclick="issueHoldCommand()" class="bg-purple-600/30 hover:bg-purple-600/50 text-purple-200 border border-purple-500/40 rounded text-xs px-2 py-1 font-semibold" title="홀딩 패턴 회전">
+                            <i class="fa-solid fa-arrows-spin"></i> HOLD
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Altitude Change Command -->
+                <div>
+                    <div class="flex justify-between text-xs text-gray-300 mb-1">
+                        <span>고도 변경 (Altitude):</span>
+                        <span id="cmdAltVal" class="font-mono text-amber-300">--- FT</span>
+                    </div>
+                    <div class="flex gap-1.5">
+                        <button onclick="adjustTargetAlt(-2000)" class="px-2 bg-gray-800 hover:bg-gray-700 text-xs rounded border border-gray-700 text-gray-200">-2k</button>
+                        <input type="number" id="inputAlt" step="1000" placeholder="FT" class="flex-1 bg-gray-900 border border-gray-700 rounded text-center text-xs text-white font-mono py-1">
+                        <button onclick="adjustTargetAlt(2000)" class="px-2 bg-gray-800 hover:bg-gray-700 text-xs rounded border border-gray-700 text-gray-200">+2k</button>
+                        <button onclick="issueAltCommand()" class="bg-amber-600/30 hover:bg-amber-600/50 text-amber-200 border border-amber-500/40 rounded text-xs font-semibold px-3 py-1">
+                            고도 지시
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Direct Waypoint Clearance -->
+                <div class="flex gap-2">
+                    <button onclick="issueDirectClearance()" class="flex-1 bg-cyan-600/20 hover:bg-cyan-600/40 text-cyan-300 border border-cyan-500/30 rounded py-1.5 text-xs font-semibold">
+                        <i class="fa-solid fa-route"></i> 항로 직항 지시
+                    </button>
+                    <button onclick="issueEmergencyClearance()" class="flex-1 bg-red-600/20 hover:bg-red-600/40 text-red-300 border border-red-500/30 rounded py-1.5 text-xs font-semibold">
+                        <i class="fa-solid fa-plane-arrival"></i> 비상착륙 승인
+                    </button>
+                </div>
+            </div>
+        </div>
+    </aside>
+
+    <!-- RIGHT PANEL: ONLINE PLAYERS LIST & SILENT RADIO LOG -->
+    <aside class="fixed top-20 right-3 z-20 w-80 max-h-[calc(100vh-6rem)] flex flex-col gap-3">
+        
+        <!-- Online Players List -->
+        <div class="glass-panel rounded-xl p-3 flex flex-col max-h-60">
+            <div class="flex justify-between items-center pb-2 border-b border-gray-800 mb-2">
+                <span class="text-xs font-bold text-gray-300 flex items-center gap-1.5">
+                    <i class="fa-solid fa-users text-cyan-400"></i> 공역 접속 플레이어 (<span id="playerCount">1</span>)
+                </span>
+                <span class="text-[10px] text-gray-500">클릭 시 추적</span>
+            </div>
+            <div id="playersList" class="overflow-y-auto space-y-1 pr-1 text-xs font-mono">
+                <!-- Dynamically populated online players -->
+            </div>
+        </div>
+
+        <!-- Silent ATC Radio Communications Log -->
+        <div class="glass-panel rounded-xl p-3 flex flex-col flex-1 min-h-[220px]">
+            <div class="flex justify-between items-center pb-2 border-b border-gray-800 mb-2">
+                <span class="text-xs font-bold text-cyan-300 flex items-center gap-1.5">
+                    <i class="fa-solid fa-walkie-talkie"></i> ATC 통신망 (SILENT LOG)
+                </span>
+                <span class="text-[10px] text-emerald-400 bg-emerald-950/60 border border-emerald-500/30 px-1.5 py-0.5 rounded">
+                    <i class="fa-solid fa-cloud mr-1"></i>Cloud Live
+                </span>
+            </div>
+            <div id="atcRadioLog" class="flex-1 overflow-y-auto space-y-1.5 text-xs font-mono text-gray-300 p-1 bg-gray-950/50 rounded-lg border border-gray-900/80"></div>
+        </div>
+    </aside>
+
+    <!-- KOREAN ATC PHRASEOLOGY GUIDE MODAL -->
+    <div id="atcGuideModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm hidden p-4">
+        <div class="glass-panel w-full max-w-2xl rounded-2xl p-6 border border-amber-500/30 flex flex-col max-h-[85vh]">
+            <div class="flex justify-between items-center pb-3 border-b border-gray-800">
+                <h2 class="text-lg font-bold text-amber-400 flex items-center gap-2">
+                    <i class="fa-solid fa-book-open-reader"></i> 📖 한국어 / ICAO 표준 관제 명령어 가이드
+                </h2>
+                <button onclick="toggleModal('atcGuideModal')" class="text-gray-400 hover:text-white text-lg">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+
+            <div class="overflow-y-auto my-4 space-y-4 pr-2 text-xs leading-relaxed text-gray-300">
+                <div class="bg-gray-950/80 p-3.5 rounded-xl border border-amber-500/20 space-y-1.5">
+                    <div class="text-amber-300 font-bold text-sm">1. 고도 변경 지시 (Altitude Instruction)</div>
+                    <p class="font-mono text-cyan-300">"[Callsign], Climb and maintain [Altitude]" / "[Callsign], 상승/하강하여 고도 [고도] 유지하라."</p>
+                    <p class="text-gray-400">예시: "KAL101, Climb and maintain 28000 FT."</p>
+                </div>
+
+                <div class="bg-gray-950/80 p-3.5 rounded-xl border border-amber-500/20 space-y-1.5">
+                    <div class="text-amber-300 font-bold text-sm">2. 기수 선회 지시 (Heading Vector Instruction)</div>
+                    <p class="font-mono text-cyan-300">"[Callsign], Turn heading [Degrees]" / "[Callsign], 기수 [방위각]도로 선회하라."</p>
+                    <p class="text-gray-400">예시: "AAR202, Turn heading 180."</p>
+                </div>
+
+                <div class="bg-gray-950/80 p-3.5 rounded-xl border border-amber-500/20 space-y-1.5">
+                    <div class="text-amber-300 font-bold text-sm">3. 홀딩 패턴 및 대기 지시 (Holding Pattern)</div>
+                    <p class="font-mono text-cyan-300">"[Callsign], Hold at present position" / "[Callsign], 현 위치에서 대기 선회 실시하라."</p>
+                </div>
+
+                <div class="bg-gray-950/80 p-3.5 rounded-xl border border-amber-500/20 space-y-1.5">
+                    <div class="text-amber-300 font-bold text-sm">4. 비상 선언 및 Squawk 7700 (Emergency Landing)</div>
+                    <p class="font-mono text-red-400">"MAYDAY MAYDAY, Squawk 7700, Emergency landing clearance granted."</p>
+                </div>
+            </div>
+
+            <div class="pt-3 border-t border-gray-800 text-right">
+                <button onclick="toggleModal('atcGuideModal')" class="px-5 py-2 bg-amber-500 text-gray-950 font-bold text-xs rounded-xl hover:bg-amber-400 transition">
+                    확인 및 닫기
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- FIREBASE & MULTIPLAYER LOGIC -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection, deleteDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Firebase Config & Globals ---
+        // 실제 Firebase 프로젝트: fly-if-you-can
+        const appId = 'fly-if-you-can';
+        const firebaseConfig = {
+            apiKey: 'AIzaSyCX5Do39BQn6_i6ZBnjOo8iyg_3HWlCvP0',
+            authDomain: 'fly-if-you-can.firebaseapp.com',
+            projectId: 'fly-if-you-can',
+            storageBucket: 'fly-if-you-can.firebasestorage.app',
+            messagingSenderId: '704442161413',
+            appId: '1:704442161413:web:30cfadfca8daf9c92cff6c',
+            measurementId: 'G-L47JZ2DKB4'
+        };
+        
+        let app, db, auth;
+        let firebaseReady = false;
+        let firebaseInitError = null;
+        let firebaseInitPromise = null;
+        let myUserId = 'user_' + Math.random().toString(36).substring(2, 9);
+        let myCallsign = 'KAL101';
+        let myRole = 'PILOT'; // 'PILOT' or 'ATC'
+        let myAircraftType = 'AIRLINER'; // 'AIRLINER' or 'FIGHTER'
+        let serverId = 'GLOBAL';
+        let atcChannel = '120.5';
+        let combatTargetUserId = null;
+        let radioUnsubscribe = null;
+
+        const DEFAULT_ACCESS_PASSWORDS = {
+            AIR_FORCE_TRAINING: 'airforce',
+            ATC_TRAINING: 'atc',
+            FLIGHT_TRAINING: 'flight',
+            FIGHTER: 'fighter',
+            ATC: 'controller'
+        };
+        let accessPasswords = { ...DEFAULT_ACCESS_PASSWORDS };
+        let verifiedServerId = null;
+        let verifiedServerPassword = false;
+        let verifiedAtcPassword = false;
+        let verifiedFighterPassword = false;
+        // 마스터키 원문은 코드에 저장하지 않습니다.
+        // Firebase Firestore: access_control / security / masterHash
+        const MASTER_HASH_DOC_PATH = ['access_control', 'security'];
+        const MASTER_HASH_FIELD = 'masterHash';
+        const PASSWORD_DOC_PATH = ['access_control', 'passwords'];
+        let playersUnsubscribe = null;
+        const PRESENCE_TIMEOUT_MS = 12000;
+
+        function getPasswordDocRef() {
+            return doc(db, ...PASSWORD_DOC_PATH);
+        }
+
+        function getMasterHashDocRef() {
+            return doc(db, ...MASTER_HASH_DOC_PATH);
+        }
+
+        async function sha256Hex(value) {
+            const normalized = String(value || '').trim().toLowerCase();
+            const data = new TextEncoder().encode(normalized);
+            const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+            return Array.from(new Uint8Array(hashBuffer))
+                .map(byte => byte.toString(16).padStart(2, '0'))
+                .join('');
+        }
+
+        async function verifyMasterCodeFromFirebase(masterInput) {
+            if (!db || !auth || !auth.currentUser || !firebaseReady) {
+                throw new Error('Firebase 인증이 아직 완료되지 않았습니다.');
+            }
+
+            const ref = getMasterHashDocRef();
+            const snap = await getDoc(ref);
+            if (!snap.exists()) {
+                throw new Error('Firebase에 masterHash가 없습니다. access_control/security 문서를 확인하세요.');
+            }
+
+            const savedHash = String((snap.data() || {})[MASTER_HASH_FIELD] || '').trim().toLowerCase();
+            if (!savedHash) {
+                throw new Error('Firebase의 masterHash 값이 비어 있습니다.');
+            }
+
+            const enteredHash = await sha256Hex(masterInput);
+            return enteredHash === savedHash;
+        }
+
+        // Local Simulation State for My Aircraft (if Pilot)
+        const AIRLINER_CRUISE_SPEED_KT = 45000; // 일반기: 답답하지 않게 빠른 게임 속도
+        const FIGHTER_CRUISE_SPEED_KT = 63000; // 전투기: 일반기보다 빠른 게임 속도
+
+        function getCruiseSpeedForAircraft(type = myAircraftType) {
+            return type === 'FIGHTER' ? FIGHTER_CRUISE_SPEED_KT : AIRLINER_CRUISE_SPEED_KT;
+        }
+
+        let myAircraft = {
+            id: myCallsign,
+            lat: 37.45 + (Math.random() - 0.5) * 0.5,
+            lng: 126.44 + (Math.random() - 0.5) * 0.5,
+            alt: 12000,
+            targetAlt: 12000,
+            speed: AIRLINER_CRUISE_SPEED_KT,
+            targetSpeed: AIRLINER_CRUISE_SPEED_KT,
+            heading: 90,
+            targetHeading: 90,
+            squawk: "7000",
+            role: "PILOT",
+            aircraftType: "AIRLINER",
+            atcChannel: "120.5",
+            isLanded: false,
+            isDisabled: false,
+            waypoints: [], // Array of {lat, lng, name}
+            isHolding: false,
+            isEmergency: false,
+            lastUpdated: Date.now()
+        };
+
+        // All connected remote players map: userId -> playerObject
+        const remotePlayers = new Map();
+
+        // Map and markers
+        let map = null;
+        let waypointPolylineGroup = null;
+        const playerMarkers = new Map(); // userId -> { marker, trailPolyline, emergencyCircle }
+        
+        let lastTimestamp = performance.now();
+        let trackedUserId = null;
+        let waypointSeq = 1;
+        let lastAtcRouteCommandAt = 0;
+
+        window.selectRole = async function(role) {
+            if (role === 'ATC' && !verifiedAtcPassword) {
+                try {
+                    await initFirebaseCore();
+                } catch (err) {
+                    const code = err?.code ? `\n오류 코드: ${err.code}` : '';
+                    alert(`Firebase 인증/암호 정보를 불러오지 못했습니다.${code}\n\n${err?.message || err}`);
+                    console.error('ATC password load failed:', err);
+                    return;
+                }
+
+                const entered = prompt('관제사 선택 암호를 입력하세요.');
+                if (entered === null) return;
+                if (entered.trim() !== accessPasswords.ATC) {
+                    alert('관제사 암호가 올바르지 않습니다.');
+                    return;
+                }
+                verifiedAtcPassword = true;
+            }
+            myRole = role;
+            const btnPilot = document.getElementById('roleBtnPilot');
+            const btnATC = document.getElementById('roleBtnATC');
+            if (role === 'PILOT') {
+                btnPilot.className = "py-2.5 px-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-2 bg-cyan-600 text-white shadow-lg border border-cyan-400";
+                btnATC.className = "py-2.5 px-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-2 bg-gray-900 text-gray-400 border border-gray-800 hover:text-white";
+            } else {
+                btnATC.className = "py-2.5 px-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-2 bg-amber-600 text-white shadow-lg border border-amber-400";
+                btnPilot.className = "py-2.5 px-3 rounded-lg text-xs font-bold transition flex items-center justify-center gap-2 bg-gray-900 text-gray-400 border border-gray-800 hover:text-white";
+            }
+        };
+
+        window.selectAircraftType = async function(type) {
+            if (type === 'FIGHTER' && !verifiedFighterPassword) {
+                try {
+                    // 새로고침 직후에도 Firebase에 저장된 최신 전투기 암호를 먼저 불러옵니다.
+                    await initFirebaseCore();
+                } catch (err) {
+                    const code = err?.code ? `\n오류 코드: ${err.code}` : '';
+                    alert(`Firebase 인증/암호 정보를 불러오지 못했습니다.${code}\n\n${err?.message || err}`);
+                    console.error('Fighter password load failed:', err);
+                    return;
+                }
+
+                const entered = prompt('전투기 선택 암호를 입력하세요.');
+                if (entered === null) return;
+                if (entered.trim() !== accessPasswords.FIGHTER) {
+                    alert('전투기 암호가 올바르지 않습니다.');
+                    return;
+                }
+                verifiedFighterPassword = true;
+            }
+            myAircraftType = type;
+            myAircraft.aircraftType = type;
+            if (myRole === 'PILOT' && !myAircraft.isLanded) {
+                myAircraft.speed = getCruiseSpeedForAircraft(type);
+                myAircraft.targetSpeed = getCruiseSpeedForAircraft(type);
+            }
+            const civil = document.getElementById('typeBtnCivil');
+            const fighter = document.getElementById('typeBtnFighter');
+            if (type === 'FIGHTER') {
+                fighter.className = 'py-2 bg-red-600 text-white rounded-lg text-xs font-bold border border-red-400';
+                civil.className = 'py-2 bg-gray-900 text-gray-400 rounded-lg text-xs font-bold border border-gray-800';
+            } else {
+                civil.className = 'py-2 bg-cyan-600 text-white rounded-lg text-xs font-bold border border-cyan-400';
+                fighter.className = 'py-2 bg-gray-900 text-gray-400 rounded-lg text-xs font-bold border border-gray-800';
+            }
+        };
+
+        document.getElementById('inputServer').addEventListener('change', function() {
+            verifiedServerId = null;
+            verifiedServerPassword = false;
+        });
+
+        window.startMultiplayerSession = async function() {
+            try {
+                await initFirebaseCore();
+            } catch (err) {
+                const code = err?.code ? `\n오류 코드: ${err.code}` : '';
+                const origin = `\n\n현재 주소: ${location.href}\n프로토콜: ${location.protocol}`;
+                alert(`Firebase 인증에 실패했습니다.${code}\n\n${err?.message || err}${origin}`);
+                console.error('Firebase core startup error:', err);
+                return;
+            }
+
+            const selectedServer = (document.getElementById('inputServer').value || 'GLOBAL').trim().toUpperCase();
+            if (['AIR_FORCE_TRAINING', 'ATC_TRAINING', 'FLIGHT_TRAINING'].includes(selectedServer)) {
+                if (verifiedServerId !== selectedServer || !verifiedServerPassword) {
+                    const entered = prompt('이 훈련 서버는 암호가 필요합니다. 서버 암호를 입력하세요.');
+                    if (entered === null) return;
+                    if (entered.trim() !== accessPasswords[selectedServer]) {
+                        alert('서버 암호가 올바르지 않습니다.');
+                        return;
+                    }
+                    verifiedServerId = selectedServer;
+                    verifiedServerPassword = true;
+                }
+            } else {
+                verifiedServerId = selectedServer;
+                verifiedServerPassword = true;
+            }
+
+            if (myRole === 'ATC' && !verifiedAtcPassword) {
+                alert('관제사 암호를 먼저 입력해 주세요.');
+                return;
+            }
+            if (myRole === 'PILOT' && myAircraftType === 'FIGHTER' && !verifiedFighterPassword) {
+                alert('전투기 암호를 먼저 입력해 주세요.');
+                return;
+            }
+
+            const csInput = document.getElementById('inputCallsign').value.trim().toUpperCase();
+            if (csInput) myCallsign = csInput;
+            serverId = selectedServer;
+            atcChannel = (document.getElementById('inputAtcChannel').value || '120.5').trim().toUpperCase();
+            myAircraft.id = myCallsign;
+            myAircraft.aircraftType = myAircraftType;
+            if (myRole === 'PILOT' && !myAircraft.isLanded) {
+                myAircraft.speed = getCruiseSpeedForAircraft(myAircraftType);
+                myAircraft.targetSpeed = getCruiseSpeedForAircraft(myAircraftType);
+            }
+            myAircraft.atcChannel = atcChannel;
+            document.getElementById('pilotAltInput').value = Math.round(myAircraft.targetAlt);
+            document.getElementById('pilotTargetAltVal').innerText = `목표 ${Math.round(myAircraft.targetAlt).toLocaleString()} FT`;
+
+            document.getElementById('myCallsignDisplay').innerText = myCallsign;
+            document.getElementById('serverDisplay').innerText = serverId;
+            document.getElementById('channelDisplay').innerText = atcChannel;
+            document.getElementById('myRoleDisplay').innerText = myRole;
+            document.getElementById('pilotTitleCallsign').innerText = `MY AIRCRAFT (${myCallsign})`;
+            document.getElementById('setupModal').classList.add('hidden');
+
+            // Toggle panels based on role
+            if (myRole === 'ATC') {
+                document.getElementById('pilotControlPanel').classList.add('hidden');
+                document.getElementById('atcControlPanel').classList.remove('hidden');
+            } else {
+                document.getElementById('pilotControlPanel').classList.remove('hidden');
+                document.getElementById('atcControlPanel').classList.add('hidden');
+            }
+
+            document.getElementById('pilotTitleCallsign').innerText = `${myAircraftType === 'FIGHTER' ? 'FIGHTER' : 'MY AIRCRAFT'} (${myCallsign})`;
+            document.getElementById('btnAttack').classList.toggle('hidden', !(myRole === 'PILOT' && myAircraftType === 'FIGHTER'));
+            document.getElementById('combatTargetInfo').classList.toggle('hidden', !(myRole === 'PILOT' && myAircraftType === 'FIGHTER'));
+            document.getElementById('atcRadioLog').innerHTML = '';
+
+            try {
+                // 선택한 서버에 맞는 실시간 동기화를 연결합니다.
+                await subscribeToServerSync();
+            } catch (err) {
+                const code = err?.code ? `\n오류 코드: ${err.code}` : '';
+                const message = err?.message || String(err);
+                const origin = `\n\n현재 주소: ${location.href}\n프로토콜: ${location.protocol}`;
+                const hint = location.protocol === 'file:'
+                    ? '\n\n지금 HTML 파일을 직접 열고 있습니다(file://). localhost 또는 Firebase Hosting처럼 http/https 주소에서 실행해 주세요.'
+                    : '';
+                alert(`Firebase 인증에 실패했습니다.${code}\n\n${message}${origin}${hint}`);
+                console.error('Firebase startup error:', err);
+                return;
+            }
+
+            if (!map) initMap();
+            startPhysicsAndSyncLoop();
+            // 접속 시스템 메시지는 ATC 기록에 남기지 않습니다.
+        };
+
+        // 지구 경도는 -180°와 +180°에서 연결됩니다.
+        function normalizeLongitude(lng) {
+            return ((lng + 180) % 360 + 360) % 360 - 180;
+        }
+
+        function initMap() {
+            map = L.map('map', {
+                center: [36.5, 127.8],
+                zoom: 7,
+                zoomControl: false,
+                worldCopyJump: true,
+                attributionControl: true
+            });
+
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                subdomains: 'abcd',
+                maxZoom: 14,
+                minZoom: 4,
+                attribution: '&copy; OpenStreetMap &copy; CARTO'
+            }).addTo(map);
+
+            L.control.zoom({ position: 'bottomleft' }).addTo(map);
+            waypointPolylineGroup = L.layerGroup().addTo(map);
+
+            map.on('click', async (e) => {
+                const clickLat = e.latlng.lat;
+                const clickLng = e.latlng.lng;
+
+                // PILOT MODE: Add Waypoint to My Aircraft
+                if (myRole === 'PILOT') {
+                    const wptName = `WPT${waypointSeq++}`;
+                    myAircraft.waypoints.push({ lat: clickLat, lng: normalizeLongitude(clickLng), name: wptName });
+                    document.getElementById('userNextWpt').innerText = myAircraft.waypoints[0].name;
+                    drawMyWaypoints();
+                }
+                // ATC MODE: Direct Tracked Pilot to Clicked Point
+                else if (myRole === 'ATC' && trackedUserId) {
+                    const targetPlayer = remotePlayers.get(trackedUserId);
+                    if (targetPlayer && targetPlayer.role === 'PILOT') {
+                        const wptName = `ATC_WPT${waypointSeq++}`;
+                        const commandAt = Date.now();
+                        try {
+                            // 대상 조종사의 현재 상태 전체를 덮어쓰지 않고
+                            // '항로 지시'만 병합합니다. 초고속 비행 중인 조종사의
+                            // 2초 heartbeat와 충돌해 항로가 사라지는 문제를 방지합니다.
+                            const targetRef = doc(db, 'servers', serverId, 'players', trackedUserId);
+                            await setDoc(targetRef, {
+                                atcRouteCommand: {
+                                    issuedAt: commandAt,
+                                    waypoints: [{ lat: clickLat, lng: normalizeLongitude(clickLng), name: wptName }],
+                                    isHolding: false
+                                }
+                            }, { merge: true });
+                        } catch (e) {
+                            console.error('ATC direct waypoint update failed:', e);
+                            return;
+                        }
+                        logRadio(targetPlayer.id, `관제 지시: [${wptName}] 포인트로 직항(Direct) 진행.`);
+                    }
+                }
+            });
+        }
+
+        async function initFirebaseCore() {
+            if (firebaseReady) return;
+            if (firebaseInitPromise) return firebaseInitPromise;
+
+            firebaseInitPromise = (async () => {
+                if (!app) app = initializeApp(firebaseConfig);
+                if (!db) db = getFirestore(app);
+                if (!auth) auth = getAuth(app);
+
+                let credential;
+                if (auth.currentUser) {
+                    credential = { user: auth.currentUser };
+                } else if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    credential = await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    credential = await signInAnonymously(auth);
+                }
+
+                if (!credential?.user) {
+                    throw new Error('Firebase 인증은 실행됐지만 사용자 정보를 받지 못했습니다.');
+                }
+
+                myUserId = credential.user.uid;
+                // 인증이 끝난 뒤 Firestore의 최신 암호를 반드시 먼저 읽습니다.
+                await loadAccessPasswords();
+                firebaseReady = true;
+                firebaseInitError = null;
+            })();
+
+            try {
+                return await firebaseInitPromise;
+            } finally {
+                if (!firebaseReady) firebaseInitPromise = null;
+            }
+        }
+
+        async function subscribeToServerSync() {
+            if (!db || !auth || !auth.currentUser) {
+                throw new Error('Firebase 인증이 완료되지 않았습니다.');
+            }
+
+            if (playersUnsubscribe) {
+                playersUnsubscribe();
+                playersUnsubscribe = null;
+            }
+            if (radioUnsubscribe) {
+                radioUnsubscribe();
+                radioUnsubscribe = null;
+            }
+
+            remotePlayers.clear();
+            const playersCol = collection(db, 'servers', serverId, 'players');
+            playersUnsubscribe = onSnapshot(playersCol, (snapshot) => {
+                // Firestore documents remain after a browser is closed.
+                // Only treat recently-updated players as online, and collapse duplicate
+                // callsigns so an old session cannot appear as a second aircraft.
+                const now = Date.now();
+                const latestByCallsign = new Map();
+
+                snapshot.forEach(docSnap => {
+                    const data = docSnap.data() || {};
+                    const uid = docSnap.id;
+
+                    // ATC가 내 기체에 보낸 '직항 웨이포인트' 명령만 읽습니다.
+                    // 내 기체의 위치/속도 등 로컬 물리 상태는 서버 스냅샷으로 덮어쓰지 않습니다.
+                    if (uid === myUserId) {
+                        const cmd = data.atcRouteCommand;
+                        const commandAt = Number(cmd?.issuedAt) || 0;
+                        if (myRole === 'PILOT' && commandAt > lastAtcRouteCommandAt && Array.isArray(cmd?.waypoints)) {
+                            myAircraft.waypoints = cmd.waypoints.map(w => ({
+                                lat: Number(w.lat),
+                                lng: normalizeLongitude(Number(w.lng)),
+                                name: String(w.name || `ATC_WPT${commandAt}`)
+                            })).filter(w => Number.isFinite(w.lat) && Number.isFinite(w.lng));
+                            myAircraft.isHolding = Boolean(cmd.isHolding);
+                            myAircraft.atcRouteCommand = cmd;
+                            lastAtcRouteCommandAt = commandAt;
+
+                            const nextWptEl = document.getElementById('userNextWpt');
+                            if (nextWptEl) nextWptEl.innerText = myAircraft.waypoints[0]?.name || 'DIRECT HEADING';
+                            drawMyWaypoints();
+                        }
+                        return;
+                    }
+
+                    const lastSeen = Number(data.lastUpdated) || 0;
+                    if (!lastSeen || now - lastSeen > PRESENCE_TIMEOUT_MS) return;
+
+                    const callsign = String(data.id || uid).trim().toUpperCase();
+                    const existing = latestByCallsign.get(callsign);
+                    if (!existing || lastSeen > existing.data.lastUpdated) {
+                        latestByCallsign.set(callsign, { uid, data: { ...data, lng: normalizeLongitude(Number(data.lng) || 0), lastUpdated: lastSeen } });
+                    }
+                });
+
+                const activeIds = new Set();
+                remotePlayers.clear();
+                latestByCallsign.forEach(({ uid, data }) => {
+                    activeIds.add(uid);
+                    remotePlayers.set(uid, data);
+                });
+
+                // Remove markers for players that are stale, disconnected,
+                // or hidden because a newer session uses the same callsign.
+                for (const [uid] of playerMarkers.entries()) {
+                    if (uid !== myUserId && !activeIds.has(uid)) {
+                        removePlayerMarker(uid);
+                    }
+                }
+
+                updatePlayersUIList();
+            }, (error) => {
+                console.error('Firestore player sync error:', error);
+            });
+
+            const radioCol = collection(db, 'servers', serverId, 'radio');
+            radioUnsubscribe = onSnapshot(radioCol, (snapshot) => {
+                const messages = [];
+                snapshot.forEach(d => {
+                    const m = d.data();
+                    if ((m.channel || '') === atcChannel && isConversationRadioMessage(m.sender, m.text)) messages.push(m);
+                });
+                messages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+                const logBox = document.getElementById('atcRadioLog');
+                logBox.innerHTML = '';
+                messages.slice(-80).forEach(m => appendRadioMessage(m.sender, m.text, m.timestamp));
+                logBox.scrollTop = logBox.scrollHeight;
+            }, (error) => console.error('Radio sync error:', error));
+
+            document.getElementById('connStatusDot').className = 'w-3 h-3 rounded-full bg-emerald-400 pulse-green';
+        }
+
+        async function initFirebaseAndSync() {
+            if (!firebaseReady) {
+                try {
+                    await initFirebaseCore();
+                } catch (err) {
+                    firebaseReady = false;
+                    firebaseInitError = err;
+                    document.getElementById('connStatusDot').className = 'w-3 h-3 rounded-full bg-red-500';
+                    console.error('Firebase init failed:', err);
+                    throw err;
+                }
+            }
+            await subscribeToServerSync();
+        }
+
+        window.addEventListener('pagehide', () => {
+            // Best-effort cleanup when the page is closed or refreshed.
+            // The timeout-based presence check above is the reliable fallback.
+            try {
+                if (db && auth && auth.currentUser && serverId && myUserId) {
+                    const ref = doc(db, 'servers', serverId, 'players', myUserId);
+                    deleteDoc(ref).catch(() => {});
+                }
+            } catch (_) {}
+        });
+
+        async function pushMyStateToFirestore() {
+            if (!db || !auth || !auth.currentUser) return;
+            try {
+                myAircraft.role = myRole;
+                myAircraft.online = true;
+                myAircraft.lastUpdated = Date.now();
+                const docRef = doc(db, 'servers', serverId, 'players', myUserId);
+                await setDoc(docRef, myAircraft);
+            } catch (e) {
+                // Ignore silent network jitter
+            }
+        }
+
+        function startPhysicsAndSyncLoop() {
+            let lastFirestoreSync = 0;
+
+            function loop(now) {
+                const dt = Math.min((now - lastTimestamp) / 1000, 0.2);
+                lastTimestamp = now;
+
+                // If Pilot, update local physics
+                if (myRole === 'PILOT') {
+                    updateMyPhysics(dt);
+                }
+
+                // Render all players (My aircraft + remote players)
+                renderAllPlayers();
+
+                // Heartbeat for online presence. This also keeps ATC sessions visible.
+                if (now - lastFirestoreSync > 2000) {
+                    pushMyStateToFirestore();
+                    lastFirestoreSync = now;
+                }
+
+                // Camera tracking in ATC mode
+                if (myRole === 'ATC' && trackedUserId) {
+                    const tracked = remotePlayers.get(trackedUserId);
+                    if (tracked) {
+                        map.panTo([tracked.lat, tracked.lng], { animate: false });
+                    }
+                }
+
+                requestAnimationFrame(loop);
+            }
+            requestAnimationFrame(loop);
+        }
+
+        function updateMyPhysics(dt) {
+            // Landing / combat-disabled aircraft are fully stopped.
+            if (myAircraft.isLanded || myAircraft.isDisabled) {
+                myAircraft.speed = 0;
+                myAircraft.targetSpeed = 0;
+                return;
+            }
+
+            // Holding
+            if (myAircraft.isHolding) {
+                myAircraft.targetHeading = (myAircraft.targetHeading + 3 * dt) % 360;
+            }
+
+            // Position calculation.
+            // 웨이포인트가 있을 때는 '현재 위치 -> 다음 웨이포인트' 방향으로
+            // 대권항법(구면 좌표) 이동을 사용합니다. 이렇게 하면 전투기 속도가
+            // 매우 빨라도 한 프레임에 웨이포인트를 지나쳐 버리는 문제가 없습니다.
+            let remainingNm = (myAircraft.speed / 3600) * dt;
+            let routeChanged = false;
+
+            while (!myAircraft.isHolding && myAircraft.waypoints.length > 0 && remainingNm > 0) {
+                const targetWpt = myAircraft.waypoints[0];
+                const distNm = getDistanceNm(myAircraft.lat, myAircraft.lng, targetWpt.lat, targetWpt.lng);
+
+                if (distNm <= 0.05) {
+                    myAircraft.lat = targetWpt.lat;
+                    myAircraft.lng = normalizeLongitude(targetWpt.lng);
+                    myAircraft.waypoints.shift();
+                    routeChanged = true;
+                    continue;
+                }
+
+                myAircraft.targetHeading = getBearing(
+                    myAircraft.lat, myAircraft.lng,
+                    targetWpt.lat, targetWpt.lng
+                );
+                myAircraft.heading = myAircraft.targetHeading;
+
+                if (remainingNm >= distNm) {
+                    // 웨이포인트에 정확히 도착시키고 남은 이동량으로 다음
+                    // 웨이포인트까지 계속 진행합니다.
+                    myAircraft.lat = targetWpt.lat;
+                    myAircraft.lng = normalizeLongitude(targetWpt.lng);
+                    remainingNm -= distNm;
+                    myAircraft.waypoints.shift();
+                    routeChanged = true;
+                } else {
+                    moveGreatCircle(myAircraft, remainingNm, myAircraft.targetHeading);
+                    remainingNm = 0;
+                }
+            }
+
+            // 웨이포인트가 없으면 현재 기수 방향으로 이동합니다.
+            if (!myAircraft.isHolding && myAircraft.waypoints.length === 0 && remainingNm > 0) {
+                myAircraft.heading = ((myAircraft.heading % 360) + 360) % 360;
+                myAircraft.targetHeading = myAircraft.heading;
+                moveGreatCircle(myAircraft, remainingNm, myAircraft.heading);
+                remainingNm = 0;
+            }
+
+            // Hold 중에는 현재 기수 방향으로 비행하며 선회합니다.
+            if (myAircraft.isHolding && remainingNm > 0) {
+                myAircraft.heading = ((myAircraft.targetHeading % 360) + 360) % 360;
+                moveGreatCircle(myAircraft, remainingNm, myAircraft.heading);
+                remainingNm = 0;
+            }
+
+            if (routeChanged) {
+                const nextWptEl = document.getElementById('userNextWpt');
+                if (nextWptEl) nextWptEl.innerText = myAircraft.waypoints[0]?.name || 'DIRECT HEADING';
+                drawMyWaypoints();
+            }
+
+            // 고도는 목표값으로 즉시 변경
+            myAircraft.alt = myAircraft.targetAlt;
+
+            // Update Pilot HUD telemetry
+            document.getElementById('userAltVal').innerText = `${Math.round(myAircraft.alt).toLocaleString()} FT`;
+            document.getElementById('userHdgVal').innerText = `${Math.round(myAircraft.heading).toString().padStart(3, '0')}°`;
+            document.getElementById('userSpdVal').innerText = `${Math.round(myAircraft.speed)} KT`;
+        }
+
+        function moveGreatCircle(aircraft, distanceNm, bearingDeg) {
+            if (!(distanceNm > 0)) return;
+
+            const earthRadiusNm = 3440.065;
+            const angularDistance = distanceNm / earthRadiusNm;
+            const bearing = bearingDeg * Math.PI / 180;
+            const lat1 = aircraft.lat * Math.PI / 180;
+            const lon1 = aircraft.lng * Math.PI / 180;
+
+            const sinLat1 = Math.sin(lat1);
+            const cosLat1 = Math.cos(lat1);
+            const sinAd = Math.sin(angularDistance);
+            const cosAd = Math.cos(angularDistance);
+
+            const lat2 = Math.asin(
+                sinLat1 * cosAd +
+                cosLat1 * sinAd * Math.cos(bearing)
+            );
+
+            const lon2 = lon1 + Math.atan2(
+                Math.sin(bearing) * sinAd * cosLat1,
+                cosAd - sinLat1 * Math.sin(lat2)
+            );
+
+            aircraft.lat = Math.max(-89.9999, Math.min(89.9999, lat2 * 180 / Math.PI));
+            aircraft.lng = normalizeLongitude(lon2 * 180 / Math.PI);
+        }
+
+        function renderAllPlayers() {
+            // Render My Aircraft if Pilot
+            if (myRole === 'PILOT') {
+                upsertPlayerMarker(myUserId, myAircraft, true);
+            } else {
+                removePlayerMarker(myUserId);
+            }
+
+            // Render Remote Players
+            remotePlayers.forEach((pData, uid) => {
+                upsertPlayerMarker(uid, pData, false);
+            });
+        }
+
+        function upsertPlayerMarker(uid, pData, isSelf) {
+            let record = playerMarkers.get(uid);
+            const color = pData.isDisabled ? '#ff3344' : (pData.isLanded ? '#9ca3af' : (pData.isEmergency ? '#ff3344' : (pData.role === 'ATC' ? '#f59e0b' : (isSelf ? '#00f3ff' : '#00ff66'))));
+            const typeLabel = pData.aircraftType === 'FIGHTER' ? 'FIGHTER' : (pData.role === 'ATC' ? 'ATC' : 'AIRLINER');
+            const iconHtml = `
+                <div class="relative flex items-start" style="width: 120px;">
+                    <div style="transform: rotate(${pData.heading || 0}deg); transition: transform 0.2s linear;" class="w-8 h-8 flex items-center justify-center">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="${color}">
+                            <path d="M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z"/>
+                        </svg>
+                    </div>
+                    <div class="ml-1 bg-gray-950/85 px-1.5 py-0.5 rounded border border-gray-800 text-[9px] font-mono leading-tight whitespace-nowrap pointer-events-auto" style="color: ${color}">
+                        <div class="font-bold flex items-center gap-1">
+                            ${pData.id} [${typeLabel}] ${pData.isLanded ? '<span class="text-gray-400">LANDED</span>' : ''} ${pData.isEmergency ? '<span class="text-red-500 font-black animate-ping">!</span>' : ''}
+                        </div>
+                        <div>ALT ${Math.round(pData.alt || 0).toLocaleString()} FT • FL${Math.round((pData.alt || 0) / 100)} • ${Math.round(pData.speed || 0)}kt</div>
+                    </div>
+                </div>
+            `;
+
+            const customIcon = L.divIcon({
+                html: iconHtml,
+                className: '',
+                iconSize: [80, 50],
+                iconAnchor: [15, 15]
+            });
+
+            if (!record) {
+                const marker = L.marker([pData.lat, pData.lng], { icon: customIcon }).addTo(map);
+                marker.on('click', () => {
+                    if (myRole === 'ATC' && pData.role === 'PILOT') {
+                        selectTrackedPilot(uid);
+                    } else if (myRole === 'PILOT' && myAircraftType === 'FIGHTER' && pData.role === 'PILOT' && uid !== myUserId) {
+                        selectCombatTarget(uid);
+                    }
+                });
+                playerMarkers.set(uid, { marker });
+            } else {
+                record.marker.setLatLng([pData.lat, pData.lng]);
+                record.marker.setIcon(customIcon);
+            }
+        }
+
+        function removePlayerMarker(uid) {
+            const record = playerMarkers.get(uid);
+            if (record) {
+                map.removeLayer(record.marker);
+                playerMarkers.delete(uid);
+            }
+        }
+
+        function drawMyWaypoints() {
+            waypointPolylineGroup.clearLayers();
+            if (myAircraft.waypoints.length === 0) return;
+
+            const coords = [[myAircraft.lat, myAircraft.lng]];
+            myAircraft.waypoints.forEach(wpt => {
+                coords.push([wpt.lat, wpt.lng]);
+                const wptIcon = L.divIcon({
+                    html: `<div class="bg-cyan-500 text-gray-950 font-bold text-[9px] px-1 rounded shadow-md border border-cyan-300 font-mono">${wpt.name}</div>`,
+                    className: '',
+                    iconAnchor: [15, 10]
+                });
+                L.marker([wpt.lat, wpt.lng], { icon: wptIcon }).addTo(waypointPolylineGroup);
+            });
+
+            L.polyline(coords, { color: '#00f3ff', weight: 2, dashArray: '4, 4' }).addTo(waypointPolylineGroup);
+        }
+
+        // --- ATC Controller & Callsigns ---
+        function onCallsignSearchInput(val) {
+            const query = val.trim().toUpperCase();
+            const suggestionsEl = document.getElementById('atcSearchSuggestions');
+            suggestionsEl.innerHTML = '';
+
+            if (query.length === 0) {
+                suggestionsEl.classList.add('hidden');
+                return;
+            }
+
+            const matches = [];
+            remotePlayers.forEach((p, uid) => {
+                if (p.role === 'PILOT' && p.id.includes(query)) {
+                    matches.push({ uid, ...p });
+                }
+            });
+
+            if (matches.length > 0) {
+                matches.forEach(m => {
+                    const div = document.createElement('div');
+                    div.className = 'px-3 py-1.5 hover:bg-cyan-900/40 text-xs font-mono text-cyan-300 cursor-pointer flex justify-between border-b border-gray-900';
+                    div.innerHTML = `<span>${m.id}</span> <span class="text-gray-500">ALT ${Math.round(m.alt || 0).toLocaleString()} FT</span>`;
+                    div.onclick = () => {
+                        selectTrackedPilot(m.uid);
+                        document.getElementById('atcSearchInput').value = m.id;
+                        suggestionsEl.classList.add('hidden');
+                    };
+                    suggestionsEl.appendChild(div);
+                });
+                suggestionsEl.classList.remove('hidden');
+            } else {
+                suggestionsEl.classList.add('hidden');
+            }
+        }
+
+        function selectTrackedPilot(uid) {
+            trackedUserId = uid;
+            const target = remotePlayers.get(uid);
+            if (!target) return;
+
+            map.panTo([target.lat, target.lng], { animate: true, duration: 0.5 });
+
+            document.getElementById('trackedCallsign').innerText = target.id;
+            document.getElementById('trackedSquawk').innerText = `SQK: ${target.squawk}`;
+            document.getElementById('trackedDetailInfo').innerHTML = `
+                <div class="grid grid-cols-2 gap-1 text-[11px] font-mono">
+                    <div>현재 고도: <span class="text-cyan-300">${Math.round(target.alt || 0).toLocaleString()} FT</span></div>
+                    <div>목표 고도: <span class="text-amber-300">${Math.round(target.targetAlt || target.alt || 0).toLocaleString()} FT</span></div>
+                    <div>기수: <span class="text-cyan-300">${Math.round(target.heading)}°</span></div>
+                    <div>속도: <span class="text-cyan-300">${Math.round(target.speed)} KT</span></div>
+                </div>
+            `;
+
+            document.getElementById('atcCommandSection').classList.remove('opacity-50', 'pointer-events-none');
+            document.getElementById('cmdHdgVal').innerText = `${Math.round(target.targetHeading || target.heading)}°`;
+            document.getElementById('cmdAltVal').innerText = `${Math.round(target.targetAlt || target.alt)} FT`;
+            document.getElementById('inputHdg').value = Math.round(target.targetHeading || target.heading);
+            document.getElementById('inputAlt').value = Math.round(target.targetAlt || target.alt);
+
+            logRadio("ATC CENTER", `${target.id} 조종사 레이더 추적 개시.`);
+        }
+
+        window.clearTrackedAircraft = function() {
+            trackedUserId = null;
+            document.getElementById('atcSearchInput').value = '';
+            document.getElementById('trackedCallsign').innerText = '대상 항공기 미선택';
+            document.getElementById('trackedSquawk').innerText = 'SQK: ----';
+            document.getElementById('trackedDetailInfo').innerHTML = '<p>목록에서 조종사를 선택하거나 콜사인을 입력하여 관제 명령을 지시하십시오.</p>';
+            document.getElementById('atcCommandSection').classList.add('opacity-50', 'pointer-events-none');
+        };
+
+        window.issueHeadingCommand = function() {
+            if (!trackedUserId) return;
+            const target = remotePlayers.get(trackedUserId);
+            const val = parseFloat(document.getElementById('inputHdg').value);
+            if (target && !isNaN(val)) {
+                target.targetHeading = (val % 360 + 360) % 360;
+                target.isHolding = false;
+                pushMyStateToFirestore();
+                document.getElementById('cmdHdgVal').innerText = `${Math.round(target.targetHeading)}°`;
+                logRadio(target.id, `관제 지시: 기수 ${Math.round(target.targetHeading)}도로 선회 유지.`);
+            }
+        };
+
+        window.issueAltCommand = async function() {
+            if (!trackedUserId) return;
+            const target = remotePlayers.get(trackedUserId);
+            const val = parseFloat(document.getElementById('inputAlt').value);
+            if (target && !isNaN(val)) {
+                target.targetAlt = val;
+                target.alt = val;
+                remotePlayers.set(trackedUserId, target);
+
+                // 관제사가 지정한 항공기의 고도를 서버에도 즉시 반영
+                if (db && auth && auth.currentUser) {
+                    try {
+                        const targetRef = doc(db, 'servers', serverId, 'players', trackedUserId);
+                        await setDoc(targetRef, { ...target, alt: val, targetAlt: val, lastUpdated: Date.now() });
+                    } catch (e) {
+                        console.error('ATC altitude update failed:', e);
+                    }
+                }
+
+                document.getElementById('cmdAltVal').innerText = `${Math.round(val)} FT`;
+                logRadio(target.id, `관제 지시: 고도 ${Math.round(val)}피트로 즉시 변경.`);
+            }
+        };
+
+        window.adjustTargetAlt = function(delta) {
+            const input = document.getElementById('inputAlt');
+            let cur = parseFloat(input.value) || 10000;
+            cur = Math.max(1000, Math.min(45000, cur + delta));
+            input.value = cur;
+            issueAltCommand();
+        };
+
+        window.issueHoldCommand = function() {
+            if (!trackedUserId) return;
+            const target = remotePlayers.get(trackedUserId);
+            if (target) {
+                target.isHolding = !target.isHolding;
+                pushMyStateToFirestore();
+                logRadio(target.id, target.isHolding ? `관제 지시: 현 위치 대기 선회(Hold) 실시.` : `관제 지시: 대기 해제.`);
+            }
+        };
+
+        window.issueDirectClearance = function() {
+            if (!trackedUserId) return;
+            logRadio(trackedUserId, `관제 지시: 지도를 클릭하여 직항 웨이포인트 목적지를 지정하십시오.`);
+        };
+
+        window.issueEmergencyClearance = function() {
+            if (!trackedUserId) return;
+            const target = remotePlayers.get(trackedUserId);
+            if (target) {
+                target.isEmergency = !target.isEmergency;
+                target.squawk = target.isEmergency ? "7700" : "7000";
+                pushMyStateToFirestore();
+                logRadio(target.id, target.isEmergency ? `[비상 승인] 비상착륙 공역 진입 승인 완료.` : `비상 상태 해제.`);
+            }
+        };
+
+        window.toggleUserEmergency = function() {
+            myAircraft.isEmergency = !myAircraft.isEmergency;
+            myAircraft.squawk = myAircraft.isEmergency ? "7700" : "7000";
+            const btn = document.getElementById('btnEmergencyTrigger');
+            if (myAircraft.isEmergency) {
+                btn.className = "py-1.5 px-3 bg-red-600 text-white text-xs rounded-lg transition font-medium border border-red-400 animate-pulse flex items-center gap-1";
+                logRadio(myAircraft.id, `[MAYDAY] Squawk 7700 비상 상황 선언!`);
+            } else {
+                btn.className = "py-1.5 px-3 bg-red-600/20 hover:bg-red-600/30 text-red-400 text-xs rounded-lg transition font-medium border border-red-500/40 flex items-center gap-1";
+                logRadio(myAircraft.id, `Squawk 7000 정상 복구.`);
+            }
+            pushMyStateToFirestore();
+        };
+
+        window.clearUserWaypoints = function() {
+            myAircraft.waypoints = [];
+            document.getElementById('userNextWpt').innerText = "DIRECT HEADING";
+            drawMyWaypoints();
+        };
+
+        function updatePlayersUIList() {
+            const listEl = document.getElementById('playersList');
+            const totalCount = remotePlayers.size + 1;
+            document.getElementById('playerCount').innerText = totalCount;
+            document.getElementById('onlineCount').innerText = totalCount;
+            listEl.innerHTML = '';
+
+            // Render My Entry
+            const myDiv = document.createElement('div');
+            myDiv.className = 'p-1.5 rounded flex items-center justify-between bg-cyan-950/60 border border-cyan-500/30 text-cyan-200 font-mono text-xs';
+            myDiv.innerHTML = `
+                <div class="flex items-center gap-1.5">
+                    <i class="fa-solid fa-circle text-[8px] text-emerald-400"></i>
+                    <span class="font-bold">${myCallsign} (나)</span>
+                </div>
+                <span class="text-[10px] text-gray-400">[${myRole}] ${myAircraftType === 'FIGHTER' ? 'FTR' : ''} • ${atcChannel}</span>
+            `;
+            listEl.appendChild(myDiv);
+
+            // Render Remote Players
+            remotePlayers.forEach((p, uid) => {
+                const item = document.createElement('div');
+                item.className = `p-1.5 rounded flex items-center justify-between cursor-pointer border transition ${uid === trackedUserId ? 'bg-amber-950/80 border-amber-400 text-amber-200' : 'bg-gray-900/40 border-gray-800/80 hover:bg-gray-800/60 text-gray-300'}`;
+                item.onclick = () => {
+                    if (myRole === 'ATC' && p.role === 'PILOT') {
+                        selectTrackedPilot(uid);
+                    } else if (myRole === 'PILOT' && myAircraftType === 'FIGHTER' && p.role === 'PILOT' && uid !== myUserId) {
+                        selectCombatTarget(uid);
+                    }
+                };
+
+                item.innerHTML = `
+                    <div class="flex items-center gap-1.5">
+                        <i class="fa-solid ${p.role === 'ATC' ? 'fa-headset text-amber-400' : 'fa-plane text-cyan-400'} text-[10px]"></i>
+                        <span class="font-bold">${p.id}</span>
+                    </div>
+                    <div class="text-[10px] text-gray-400">${p.role === 'PILOT' ? `ALT ${Math.round(p.alt || 0).toLocaleString()} FT • ${p.aircraftType === 'FIGHTER' ? 'FTR' : 'FL' + Math.round((p.alt || 0)/100)}` : 'ATC'} • ${p.atcChannel || '---'}</div>
+                `;
+                listEl.appendChild(item);
+            });
+        }
+
+        function isConversationRadioMessage(sender, text) {
+            const value = String(text || '');
+            const blockedPhrases = [
+                '레이더 추적 개시',
+                '통신 ID가',
+                '의 통신 ID가',
+                '착륙 완료.',
+                '비행 재개.',
+                '고도 변경:',
+                '고도 설정.',
+                '전투기 표적 지정',
+                '[전투]',
+                '공격 실패:'
+            ];
+            if (sender === 'SYSTEM' || sender === 'ATC CENTER') return false;
+            return !blockedPhrases.some(prefix => value.includes(prefix));
+        }
+
+        function appendRadioMessage(sender, text, timestamp) {
+            const logBox = document.getElementById('atcRadioLog');
+            const now = new Date(timestamp || Date.now());
+            const timeStr = now.toTimeString().split(' ')[0];
+            const msgDiv = document.createElement('div');
+            msgDiv.className = "border-b border-gray-900/60 pb-1 text-[11px] leading-tight";
+            msgDiv.innerHTML = `<span class="text-gray-500">[${timeStr}]</span> <span class="font-bold text-cyan-400">${sender}:</span> <span class="text-gray-200">${text}</span>`;
+            logBox.appendChild(msgDiv);
+        }
+
+        async function logRadio(sender, text) {
+            // ATC 기록에는 실제 조종사↔관제사 통신만 표시합니다.
+            // 시스템 알림, UI 상태 변경, 전투/표적 상태 등은 기록하지 않습니다.
+            if (!isConversationRadioMessage(sender, text)) return;
+
+            if (!db || !auth || !auth.currentUser) {
+                appendRadioMessage(sender, text, Date.now());
+                return;
+            }
+            try {
+                const radioRef = doc(collection(db, 'servers', serverId, 'radio'));
+                await setDoc(radioRef, {
+                    sender, text, channel: atcChannel, timestamp: Date.now()
+                });
+            } catch (e) {
+                appendRadioMessage(sender, text, Date.now());
+            }
+        }
+
+        function selectCombatTarget(uid) {
+            const target = remotePlayers.get(uid);
+            if (!target) return;
+            combatTargetUserId = uid;
+            document.getElementById('combatTargetName').innerText = target.id;
+            document.getElementById('combatTargetInfo').classList.remove('hidden');
+            logRadio(myCallsign, `전투기 표적 지정: ${target.id}`);
+        }
+
+        window.changeAtcChannel = async function() {
+            if (!auth || !auth.currentUser) {
+                alert('먼저 멀티플레이어 공역에 접속해 주세요.');
+                return;
+            }
+
+            const newChannel = prompt(`현재 통신 ID: ${atcChannel}\n\n변경할 통신 ID를 입력하세요.`, atcChannel);
+            if (newChannel === null) return;
+
+            const normalized = newChannel.trim().toUpperCase();
+            if (!normalized) {
+                alert('통신 ID를 입력해 주세요.');
+                return;
+            }
+            if (normalized.length > 12) {
+                alert('통신 ID는 12자 이내로 입력해 주세요.');
+                return;
+            }
+            if (normalized === atcChannel) return;
+
+            const oldChannel = atcChannel;
+            atcChannel = normalized;
+            myAircraft.atcChannel = atcChannel;
+
+            document.getElementById('channelDisplay').innerText = atcChannel;
+            const logBox = document.getElementById('atcRadioLog');
+            logBox.innerHTML = '';
+
+            // 현재 기체의 통신 ID를 즉시 서버에 반영합니다.
+            await pushMyStateToFirestore();
+            await logRadio('SYSTEM', `${myCallsign}의 통신 ID가 ${oldChannel} → ${atcChannel}(으)로 변경되었습니다.`);
+        };
+
+        window.toggleLanding = function() {
+            if (myRole !== 'PILOT') return;
+            myAircraft.isLanded = !myAircraft.isLanded;
+            if (myAircraft.isLanded) {
+                myAircraft.speed = 0;
+                myAircraft.targetSpeed = 0;
+                myAircraft.isHolding = false;
+                document.getElementById('btnLanding').innerHTML = '<i class="fa-solid fa-plane-departure mr-1"></i> 이륙 / 재개';
+                logRadio(myCallsign, '착륙 완료. 비행을 중지합니다.');
+            } else {
+                myAircraft.speed = getCruiseSpeedForAircraft();
+                myAircraft.targetSpeed = getCruiseSpeedForAircraft();
+                document.getElementById('btnLanding').innerHTML = '<i class="fa-solid fa-plane-arrival mr-1"></i> 착륙 / 정지';
+                logRadio(myCallsign, '비행 재개.');
+            }
+            pushMyStateToFirestore();
+        };
+
+        window.attackTarget = async function() {
+            if (myRole !== 'PILOT' || myAircraftType !== 'FIGHTER' || !combatTargetUserId || myAircraft.isLanded) return;
+            const target = remotePlayers.get(combatTargetUserId);
+            if (!target) return;
+            const distance = getDistanceNm(myAircraft.lat, myAircraft.lng, target.lat, target.lng);
+            if (distance > 80) {
+                logRadio(myCallsign, `공격 실패: ${target.id}와의 거리가 ${distance.toFixed(1)} NM로 사거리(80 NM)를 초과합니다.`);
+                return;
+            }
+            try {
+                const targetRef = doc(db, 'servers', serverId, 'players', combatTargetUserId);
+                await setDoc(targetRef, {
+                    ...target,
+                    isDisabled: true,
+                    speed: 0,
+                    targetSpeed: 0,
+                    lastHitBy: myCallsign,
+                    lastHitAt: Date.now(),
+                    lastUpdated: Date.now()
+                });
+                logRadio(myCallsign, `[전투] ${target.id} 공격 성공. 대상 항공기 비행 중지.`);
+            } catch (e) {
+                console.error('Attack failed:', e);
+                logRadio(myCallsign, '공격 실패: 서버 권한 또는 연결 상태를 확인하십시오.');
+            }
+        };
+
+        async function loadAccessPasswords() {
+            let localPasswords = null;
+            const local = localStorage.getItem('radarAccessPasswords');
+            if (local) {
+                try {
+                    const saved = JSON.parse(local);
+                    if (saved && saved.passwords) {
+                        localPasswords = { ...DEFAULT_ACCESS_PASSWORDS, ...saved.passwords };
+                    } else {
+                        localPasswords = { ...DEFAULT_ACCESS_PASSWORDS, ...saved };
+                    }
+                } catch (_) {}
+            }
+
+            if (!db) {
+                accessPasswords = localPasswords || { ...DEFAULT_ACCESS_PASSWORDS };
+                return;
+            }
+
+            const ref = getPasswordDocRef();
+            const snap = await getDoc(ref);
+
+            if (snap.exists()) {
+                const data = snap.data() || {};
+                const remotePasswords = data.passwords
+                    ? { ...DEFAULT_ACCESS_PASSWORDS, ...data.passwords }
+                    : { ...DEFAULT_ACCESS_PASSWORDS, ...data };
+                accessPasswords = remotePasswords;
+                localStorage.setItem('radarAccessPasswords', JSON.stringify({
+                    passwords: accessPasswords,
+                    updatedAt: Number(data.updatedAt) || Date.now()
+                }));
+                return;
+            }
+
+            accessPasswords = localPasswords || { ...DEFAULT_ACCESS_PASSWORDS };
+            const updatedAt = Date.now();
+            localStorage.setItem('radarAccessPasswords', JSON.stringify({
+                passwords: accessPasswords,
+                updatedAt
+            }));
+            await setDoc(ref, { passwords: accessPasswords, updatedAt }, { merge: false });
+        }
+
+        async function saveAccessPasswordsToFirebase() {
+            if (!db || !auth || !auth.currentUser || !firebaseReady) {
+                if (firebaseInitError) throw firebaseInitError;
+                throw new Error('Firebase 인증이 아직 완료되지 않았습니다.');
+            }
+
+            const ref = getPasswordDocRef();
+            const updatedAt = Date.now();
+            const payload = {
+                passwords: { ...DEFAULT_ACCESS_PASSWORDS, ...accessPasswords },
+                updatedAt
+            };
+
+            await setDoc(ref, payload, { merge: false });
+            const verifySnap = await getDoc(ref);
+
+            if (!verifySnap.exists()) {
+                throw new Error('Firestore 저장 후 문서를 다시 읽지 못했습니다.');
+            }
+
+            const saved = verifySnap.data() || {};
+            const savedPasswords = saved.passwords || {};
+            const checked = ['AIR_FORCE_TRAINING', 'ATC_TRAINING', 'FLIGHT_TRAINING', 'FIGHTER', 'ATC'];
+            const failed = checked.find(key => savedPasswords[key] !== accessPasswords[key]);
+            if (failed) {
+                throw new Error(`Firestore 검증 실패: ${failed} 값이 저장되지 않았습니다.`);
+            }
+
+            localStorage.setItem('radarAccessPasswords', JSON.stringify({
+                passwords: accessPasswords,
+                updatedAt
+            }));
+            localStorage.setItem('radarAccessPasswordsUpdatedAt', String(updatedAt));
+        }
+
+        window.changeAccessPasswords = async function() {
+            // 암호 변경 버튼은 게임 접속 전에도 사용할 수 있으므로
+            // Firebase 인증/초기화를 먼저 완료합니다.
+            if (!firebaseReady) {
+                try {
+                    await initFirebaseCore();
+                } catch (e) {
+                    console.error('Firebase password editor init failed:', e);
+                    const code = e?.code ? `\n오류 코드: ${e.code}` : '';
+                    const origin = `\n\n현재 주소: ${location.href}\n프로토콜: ${location.protocol}`;
+                    const hint = location.protocol === 'file:'
+                        ? '\n\n지금 HTML 파일을 직접 열고 있습니다(file://). localhost 또는 Firebase Hosting처럼 http/https 주소에서 실행해 주세요.'
+                        : '';
+                    alert(`Firebase 인증/연결에 실패했습니다.${code}\n\n${e?.message || e}${origin}${hint}`);
+                    return;
+                }
+            }
+
+            const master = prompt('암호 변경을 위한 마스터 코드를 입력하세요.');
+            if (master === null) return;
+
+            try {
+                const verified = await verifyMasterCodeFromFirebase(master);
+                if (!verified) {
+                    alert('마스터 코드가 올바르지 않습니다.');
+                    return;
+                }
+            } catch (e) {
+                console.error('Master hash verification failed:', e);
+                const code = e?.code ? `\n오류 코드: ${e.code}` : '';
+                alert(`마스터키 확인에 실패했습니다.${code}\n\n${e?.message || e}`);
+                return;
+            }
+
+            const next = { ...accessPasswords };
+            const serverLabels = [
+                ['AIR_FORCE_TRAINING', '공군 훈련 서버'],
+                ['ATC_TRAINING', '관제 훈련 서버'],
+                ['FLIGHT_TRAINING', '비행 훈련 서버'],
+                ['FIGHTER', '전투기 선택'],
+                ['ATC', '관제사 선택']
+            ];
+            for (const [key, label] of serverLabels) {
+                const value = prompt(`${label} 새 암호를 입력하세요.\n(현재 암호를 유지하려면 빈칸)`, next[key]);
+                if (value === null) return;
+                if (value.trim()) next[key] = value.trim();
+            }
+
+            accessPasswords = { ...DEFAULT_ACCESS_PASSWORDS, ...next };
+
+            try {
+                // Firebase에 먼저 저장하고 실제로 다시 읽어 검증합니다.
+                await saveAccessPasswordsToFirebase();
+                verifiedServerId = null;
+                verifiedServerPassword = false;
+                verifiedAtcPassword = false;
+                verifiedFighterPassword = false;
+                alert('암호가 변경되었고 Firebase 저장까지 확인되었습니다.\n\n다른 브라우저/기기에서도 같은 암호를 사용할 수 있습니다.');
+            } catch (e) {
+                console.error('Password save failed:', e);
+                const code = e?.code ? `\n오류 코드: ${e.code}` : '';
+                localStorage.setItem('radarAccessPasswords', JSON.stringify({
+                    passwords: accessPasswords,
+                    updatedAt: Date.now()
+                }));
+                alert(`Firebase 저장에 실패했습니다.${code}\n\n오류 내용: ${e?.message || e}\n\n이번 암호는 이 브라우저에만 임시 저장했습니다. Firebase Rules와 익명 인증을 확인해야 합니다.`);
+            }
+        };
+
+        window.adjustPilotAltitude = function(delta) {
+            if (myRole !== 'PILOT') return;
+            const next = Math.max(0, Math.min(60000, Math.round((myAircraft.targetAlt + delta) / 500) * 500));
+            myAircraft.targetAlt = next;
+            myAircraft.alt = next;
+            document.getElementById('pilotAltInput').value = next;
+            document.getElementById('pilotTargetAltVal').innerText = `목표 ${next.toLocaleString()} FT`;
+            logRadio(myCallsign, `고도 변경: ${next.toLocaleString()} FT 유지.`);
+            pushMyStateToFirestore();
+        };
+
+        window.setPilotAltitude = function() {
+            if (myRole !== 'PILOT') return;
+            const input = Number(document.getElementById('pilotAltInput').value);
+            if (!Number.isFinite(input) || input < 0 || input > 60000) {
+                alert('고도는 0~60,000 FT 사이로 입력하세요.');
+                return;
+            }
+            const next = Math.round(input / 100) * 100;
+            myAircraft.targetAlt = next;
+            myAircraft.alt = next;
+            document.getElementById('pilotAltInput').value = next;
+            document.getElementById('pilotTargetAltVal').innerText = `목표 ${next.toLocaleString()} FT`;
+            logRadio(myCallsign, `고도 ${next.toLocaleString()} FT 설정.`);
+            pushMyStateToFirestore();
+        };
+
+        window.toggleModal = function(id) {
+            const el = document.getElementById(id);
+            if (el) el.classList.toggle('hidden');
+        };
+
+        function getDistanceNm(lat1, lon1, lat2, lon2) {
+            const R = 3440.065;
+            const dLat = (lat2 - lat1) * Math.PI / 180;
+            const dLon = ((((lon2 - lon1 + 180) % 360) + 360) % 360 - 180) * Math.PI / 180;
+            const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c;
+        }
+
+        function getBearing(lat1, lon1, lat2, lon2) {
+            const phi1 = lat1 * Math.PI / 180;
+            const phi2 = lat2 * Math.PI / 180;
+            const lambda1 = lon1 * Math.PI / 180;
+            const lambda2 = lon2 * Math.PI / 180;
+            const deltaLambda = ((lambda2 - lambda1 + Math.PI) % (2 * Math.PI)) - Math.PI;
+
+            const y = Math.sin(deltaLambda) * Math.cos(phi2);
+            const x = Math.cos(phi1) * Math.sin(phi2) -
+                      Math.sin(phi1) * Math.cos(phi2) * Math.cos(deltaLambda);
+            return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+        }
+    </script>
+</body>
+</html>
