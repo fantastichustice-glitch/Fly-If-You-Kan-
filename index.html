@@ -116,6 +116,168 @@
             70% { transform: scale(1); box-shadow: 0 0 0 8px rgba(0, 255, 102, 0); }
             100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(0, 255, 102, 0); }
         }
+
+
+        /* Mobile / touch support */
+        html, body, #map {
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
+        }
+        button, input, select {
+            touch-action: manipulation;
+        }
+        .mobile-nav {
+            display: none;
+        }
+        .mobile-panel-toggle {
+            display: none;
+        }
+        @media (max-width: 768px) {
+            body, html {
+                font-size: 14px;
+            }
+            .radar-sweeper {
+                animation-duration: 18s;
+            }
+            header {
+                top: 4px !important;
+                left: 4px !important;
+                right: 4px !important;
+                padding: 8px !important;
+                border-radius: 10px !important;
+                gap: 6px !important;
+            }
+            header h1 {
+                font-size: 12px !important;
+            }
+            header p {
+                font-size: 9px !important;
+                line-height: 1.25;
+            }
+            header .mt-1 {
+                margin-top: 3px !important;
+            }
+            header .mt-1 button {
+                min-height: 32px;
+            }
+            header > div:last-child {
+                display: none !important;
+            }
+            aside.fixed.top-20.left-3 {
+                top: 58px !important;
+                left: 4px !important;
+                right: 4px !important;
+                width: auto !important;
+                max-height: 43vh !important;
+                overflow-y: auto !important;
+                padding-bottom: 2px;
+                z-index: 45 !important;
+                -webkit-overflow-scrolling: touch;
+            }
+            aside.fixed.top-20.right-3 {
+                top: 58px !important;
+                left: 4px !important;
+                right: 4px !important;
+                width: auto !important;
+                max-height: 55vh !important;
+                overflow-y: auto !important;
+                z-index: 46 !important;
+                -webkit-overflow-scrolling: touch;
+            }
+            aside.fixed.top-20.left-3.mobile-panel-hidden,
+            aside.fixed.top-20.right-3.mobile-panel-hidden {
+                display: none !important;
+            }
+            #pilotControlPanel, #atcControlPanel,
+            aside.fixed.top-20.right-3 > div {
+                border-radius: 12px;
+            }
+            #pilotControlPanel, #atcControlPanel {
+                padding: 10px !important;
+            }
+            #playersList {
+                max-height: 22vh;
+            }
+            #atcRadioLog {
+                min-height: 110px !important;
+                max-height: 24vh;
+            }
+            #radioMessageInput {
+                min-height: 42px;
+                font-size: 13px !important;
+            }
+            #spawnPickerModal > div {
+                max-width: none !important;
+                width: calc(100vw - 12px) !important;
+                padding: 10px !important;
+            }
+            #spawnPickerMap {
+                height: 50vh !important;
+                min-height: 280px !important;
+            }
+            #setupModal > div {
+                max-height: calc(100vh - 16px);
+                overflow-y: auto;
+                -webkit-overflow-scrolling: touch;
+                padding: 14px !important;
+            }
+            #gameOverOverlay > div,
+            #atcGuideModal > div {
+                width: calc(100vw - 20px) !important;
+                max-height: calc(100vh - 24px) !important;
+                overflow-y: auto;
+                -webkit-overflow-scrolling: touch;
+            }
+            #mobileNav {
+                display: flex;
+                position: fixed;
+                left: 6px;
+                right: 6px;
+                bottom: max(6px, env(safe-area-inset-bottom));
+                z-index: 55;
+                gap: 6px;
+                padding: 6px;
+                border-radius: 14px;
+                background: rgba(10,16,31,.92);
+                backdrop-filter: blur(12px);
+                -webkit-backdrop-filter: blur(12px);
+                border: 1px solid rgba(0,243,255,.18);
+                box-shadow: 0 8px 28px rgba(0,0,0,.45);
+            }
+            #mobileNav button {
+                flex: 1;
+                min-height: 44px;
+                border-radius: 10px;
+                font-size: 12px;
+                font-weight: 700;
+            }
+            #mobileNav .active {
+                background: rgba(0, 243, 255, .18);
+                color: #8ff7ff;
+                border: 1px solid rgba(0, 243, 255, .35);
+            }
+            #map {
+                height: 100dvh !important;
+            }
+            .leaflet-control-zoom a {
+                width: 36px !important;
+                height: 36px !important;
+                line-height: 36px !important;
+            }
+            .leaflet-popup-content {
+                font-size: 12px;
+            }
+            .glass-panel button,
+            .glass-panel input,
+            .glass-panel select {
+                min-height: 40px;
+            }
+            .glass-panel .text-\[10px\] button,
+            .glass-panel button.text-\[10px\] {
+                min-height: 34px;
+            }
+        }
+
     </style>
 </head>
 <body class="select-none overflow-hidden">
@@ -259,7 +421,7 @@
     </header>
 
     <!-- LEFT PANEL: PILOT HUD / ATC CONTROL PANEL -->
-    <aside class="fixed top-20 left-3 z-20 w-80 max-h-[calc(100vh-6rem)] flex flex-col gap-3">
+    <aside id="mainControlAside" class="fixed top-20 left-3 z-20 w-80 max-h-[calc(100vh-6rem)] flex flex-col gap-3">
         
         <!-- PILOT MODE HUD -->
         <div id="pilotControlPanel" class="glass-panel rounded-xl p-4 flex flex-col gap-3">
@@ -425,7 +587,7 @@
     </aside>
 
     <!-- RIGHT PANEL: ONLINE PLAYERS LIST & SILENT RADIO LOG -->
-    <aside class="fixed top-20 right-3 z-20 w-80 max-h-[calc(100vh-6rem)] flex flex-col gap-3">
+    <aside id="commsAside" class="fixed top-20 right-3 z-20 w-80 max-h-[calc(100vh-6rem)] flex flex-col gap-3 mobile-panel-hidden">
         
         <!-- Online Players List -->
         <div class="glass-panel rounded-xl p-3 flex flex-col max-h-60">
@@ -460,6 +622,15 @@
             <div class="text-[10px] text-gray-500 mt-1">같은 서버 + 같은 통신 ID의 파일럿/관제사가 양방향으로 대화합니다.</div>
         </div>
     </aside>
+
+
+
+    <!-- MOBILE NAV -->
+    <div id="mobileNav" class="mobile-nav" aria-label="모바일 메뉴">
+        <button id="mobilePanelBtn" class="active" onclick="toggleMobilePanel('main')">✈️ 내 화면</button>
+        <button id="mobileCommsBtn" onclick="toggleMobilePanel('comms')">📻 통신/플레이어</button>
+        <button onclick="toggleModal('atcGuideModal')">📖 가이드</button>
+    </div>
 
     <!-- KOREAN ATC PHRASEOLOGY GUIDE MODAL -->
     <div id="atcGuideModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm hidden p-4">
@@ -1948,6 +2119,54 @@
             logRadio(myCallsign, `고도 ${next.toLocaleString()} FT 설정.`);
             pushMyStateToFirestore();
         };
+
+
+
+        function isMobileLayout() {
+            return window.matchMedia && window.matchMedia('(max-width: 768px)').matches;
+        }
+
+        window.toggleMobilePanel = function(panel) {
+            const main = document.getElementById('mainControlAside');
+            const comms = document.getElementById('commsAside');
+            const mainBtn = document.getElementById('mobilePanelBtn');
+            const commsBtn = document.getElementById('mobileCommsBtn');
+            if (!main || !comms) return;
+
+            if (!isMobileLayout()) {
+                main.classList.remove('mobile-panel-hidden');
+                comms.classList.remove('mobile-panel-hidden');
+                return;
+            }
+
+            if (panel === 'comms') {
+                main.classList.add('mobile-panel-hidden');
+                comms.classList.remove('mobile-panel-hidden');
+                mainBtn?.classList.remove('active');
+                commsBtn?.classList.add('active');
+            } else {
+                comms.classList.add('mobile-panel-hidden');
+                main.classList.remove('mobile-panel-hidden');
+                commsBtn?.classList.remove('active');
+                mainBtn?.classList.add('active');
+            }
+        };
+
+        function syncMobilePanelState() {
+            if (!isMobileLayout()) {
+                document.getElementById('mainControlAside')?.classList.remove('mobile-panel-hidden');
+                document.getElementById('commsAside')?.classList.remove('mobile-panel-hidden');
+                return;
+            }
+            // 모바일에서는 내 화면을 기본으로 보여줍니다.
+            toggleMobilePanel('main');
+        }
+
+        window.addEventListener('resize', syncMobilePanelState);
+        window.addEventListener('orientationchange', () => {
+            setTimeout(syncMobilePanelState, 150);
+        });
+        setTimeout(syncMobilePanelState, 0);
 
         window.toggleModal = function(id) {
             const el = document.getElementById(id);
