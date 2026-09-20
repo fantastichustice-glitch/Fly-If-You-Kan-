@@ -158,23 +158,17 @@
                 </div>
 
                 <div>
+                    <label class="text-xs font-medium text-gray-300 mb-1 block">스폰 위치:</label>
+                    <button type="button" onclick="openSpawnPicker()" class="w-full py-2 bg-emerald-600/15 hover:bg-emerald-600/25 text-emerald-300 border border-emerald-500/35 rounded-lg text-xs font-bold transition">
+                        <i class="fa-solid fa-location-crosshairs mr-1"></i> 지도에서 스폰 위치 선택
+                    </button>
+                    <div id="spawnLocationText" class="mt-1 text-[10px] text-gray-500 font-mono">기본 위치: 37.4500, 126.4400</div>
+                </div>
+
+                <div>
                     <label class="text-xs font-medium text-gray-300 mb-1 block">관제 번호 (같은 번호끼리만 통신):</label>
                     <input type="text" id="inputAtcChannel" value="120.5" maxlength="12"
                         class="w-full bg-gray-950 text-amber-300 border border-amber-500/40 rounded-lg px-3 py-2 text-sm font-mono tracking-wider focus:outline-none focus:border-amber-400">
-                </div>
-
-                <div class="bg-gray-950/50 p-2.5 rounded-lg border border-emerald-500/20">
-                    <div class="flex items-center justify-between mb-1.5">
-                        <label class="text-xs font-medium text-gray-300">스폰 위치</label>
-                        <button type="button" onclick="pickSpawnOnMap()" class="px-2 py-1 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 rounded text-[10px] font-bold">지도에서 선택</button>
-                    </div>
-                    <div class="grid grid-cols-2 gap-2">
-                        <input type="number" id="inputSpawnLat" step="0.0001" value="37.4500" placeholder="위도"
-                            class="w-full bg-gray-950 text-emerald-300 border border-emerald-500/30 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-emerald-400">
-                        <input type="number" id="inputSpawnLng" step="0.0001" value="126.4400" placeholder="경도"
-                            class="w-full bg-gray-950 text-emerald-300 border border-emerald-500/30 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-emerald-400">
-                    </div>
-                    <p id="spawnPickHint" class="text-[10px] text-gray-500 mt-1">위도 / 경도를 직접 입력하거나 지도에서 위치를 선택하세요.</p>
                 </div>
 
                 <div id="aircraftTypeBox">
@@ -205,6 +199,24 @@
             <button onclick="startMultiplayerSession()" class="mt-2 w-full py-3 bg-gradient-to-r from-cyan-600 to-emerald-600 hover:from-cyan-500 hover:to-emerald-500 text-white font-bold text-sm rounded-xl shadow-lg transition flex items-center justify-center gap-2">
                 <i class="fa-solid fa-satellite-dish"></i> 멀티플레이어 공역 접속 시작
             </button>
+        </div>
+    </div>
+
+    <!-- SPAWN LOCATION PICKER -->
+    <div id="spawnPickerModal" class="fixed inset-0 z-[60] hidden items-center justify-center bg-black/85 backdrop-blur-md p-4">
+        <div class="glass-panel w-full max-w-4xl rounded-2xl p-4 border border-emerald-500/40 shadow-2xl">
+            <div class="flex items-center justify-between mb-3">
+                <div>
+                    <h2 class="text-base font-bold text-emerald-300 mono">스폰 위치 선택</h2>
+                    <p class="text-xs text-gray-400">지도에서 원하는 위치를 클릭하세요.</p>
+                </div>
+                <button onclick="closeSpawnPicker()" class="text-gray-400 hover:text-white text-lg"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div id="spawnPickerMap" class="w-full h-[55vh] min-h-[360px] rounded-xl border border-gray-800 overflow-hidden"></div>
+            <div class="mt-3 flex items-center justify-between gap-3">
+                <div id="spawnPickerCoords" class="text-xs text-cyan-300 font-mono">37.4500, 126.4400</div>
+                <button onclick="confirmSpawnPicker()" class="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl">선택 완료</button>
+            </div>
         </div>
     </div>
 
@@ -273,7 +285,7 @@
                 </div>
                 <div class="bg-gray-950/60 p-2 rounded-lg border border-gray-800">
                     <div class="text-[10px] text-gray-400">SPEED</div>
-                    <div id="userSpdVal" class="text-sm font-bold text-cyan-300 mono">63,000 KT</div>
+                    <div id="userSpdVal" class="text-sm font-bold text-cyan-300 mono">630 KT</div>
                 </div>
             </div>
 
@@ -544,9 +556,20 @@
         };
         const DEFAULT_SPAWN_LAT = 37.45;
         const DEFAULT_SPAWN_LNG = 126.44;
+        let selectedSpawnLat = DEFAULT_SPAWN_LAT;
+        let selectedSpawnLng = DEFAULT_SPAWN_LNG;
+        let spawnPickerMap = null;
+        let spawnPickerMarker = null;
 
         function getCruiseSpeedForAircraft(type = myAircraftType) {
             return AIRCRAFT_SPEEDS[type] || AIRCRAFT_SPEEDS.AIRLINER;
+        }
+
+        // 표시 전용 속도: 실제 물리 속도값은 그대로 유지하고 HUD/레이더에는 1/100로 표시합니다.
+        function formatDisplaySpeed(speed) {
+            const value = Number(speed);
+            if (!Number.isFinite(value)) return '0';
+            return Math.round(value / 100).toLocaleString();
         }
 
         function isCombatAircraftType(type) {
@@ -566,8 +589,6 @@
         function canAtcControlPlayer(player) {
             return myRole === 'ATC' && player?.role === 'PILOT' && isSameAtcChannel(player);
         }
-
-        let spawnPickerActive = false;
 
         let myAircraft = {
             id: myCallsign,
@@ -607,11 +628,12 @@
         let lastTimestamp = performance.now();
         let trackedUserId = null;
         let waypointSeq = 1;
-        const MARKER_RENDER_INTERVAL_MS = 80;
+        const MARKER_RENDER_INTERVAL_MS = 33;
         const TELEMETRY_UPDATE_INTERVAL_MS = 200;
         let lastMarkerRenderAt = 0;
         let lastTelemetryUpdateAt = 0;
         let lastCombatStatusKey = '';
+        let lastAtcPanAt = 0;
 
         window.selectRole = function(role) {
             myRole = role;
@@ -670,12 +692,9 @@
             serverId = selectedServer;
             atcChannel = normalizeAtcChannel(document.getElementById('inputAtcChannel').value || '120.5');
 
-            const spawnLat = Number(document.getElementById('inputSpawnLat')?.value);
-            const spawnLng = Number(document.getElementById('inputSpawnLng')?.value);
-            if (Number.isFinite(spawnLat) && spawnLat >= -90 && spawnLat <= 90) myAircraft.lat = spawnLat;
-            else myAircraft.lat = DEFAULT_SPAWN_LAT;
-            if (Number.isFinite(spawnLng) && spawnLng >= -180 && spawnLng <= 180) myAircraft.lng = normalizeLongitude(spawnLng);
-            else myAircraft.lng = DEFAULT_SPAWN_LNG;
+            // 선택한 스폰 위치를 사용합니다.
+            myAircraft.lat = Number.isFinite(Number(selectedSpawnLat)) ? Number(selectedSpawnLat) : DEFAULT_SPAWN_LAT;
+            myAircraft.lng = normalizeLongitude(Number.isFinite(Number(selectedSpawnLng)) ? Number(selectedSpawnLng) : DEFAULT_SPAWN_LNG);
 
             myAircraft.id = myCallsign;
             myAircraft.aircraftType = myAircraftType;
@@ -735,19 +754,107 @@
 
         // 지구 경도는 -180°와 +180°에서 연결됩니다.
         function normalizeLongitude(lng) {
-            return ((lng + 180) % 360 + 360) % 360 - 180;
+            return ((Number(lng) + 180) % 360 + 360) % 360 - 180;
         }
 
-        window.pickSpawnOnMap = function() {
-            if (!map) initMap();
-            spawnPickerActive = true;
-            const hint = document.getElementById('spawnPickHint');
-            if (hint) hint.innerText = '지도에서 스폰 위치를 한 번 클릭하세요.';
-            document.getElementById('setupModal').classList.add('hidden');
+        function formatCoordinate(lat, lng) {
+            return `${Number(lat).toFixed(4)}, ${Number(normalizeLongitude(lng)).toFixed(4)}`;
+        }
+
+        function ensureSpawnPickerMap() {
+            if (spawnPickerMap) {
+                setTimeout(() => spawnPickerMap.invalidateSize(), 50);
+                return;
+            }
+
+            spawnPickerMap = L.map('spawnPickerMap', {
+                center: [selectedSpawnLat, selectedSpawnLng],
+                zoom: 5,
+                zoomControl: true,
+                worldCopyJump: true,
+                attributionControl: true
+            });
+
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                subdomains: 'abcd',
+                maxZoom: 14,
+                minZoom: 2,
+                attribution: '&copy; OpenStreetMap &copy; CARTO'
+            }).addTo(spawnPickerMap);
+
+            spawnPickerMap.on('click', (e) => {
+                selectedSpawnLat = Math.max(-89.9999, Math.min(89.9999, Number(e.latlng.lat)));
+                selectedSpawnLng = normalizeLongitude(e.latlng.lng);
+                updateSpawnPickerMarker();
+            });
+
+            updateSpawnPickerMarker();
+        }
+
+        function updateSpawnPickerMarker() {
+            if (!spawnPickerMap) return;
+            const lat = Number(selectedSpawnLat);
+            const lng = normalizeLongitude(Number(selectedSpawnLng));
+            if (!spawnPickerMarker) {
+                spawnPickerMarker = L.marker([lat, lng], { draggable: false }).addTo(spawnPickerMap);
+            } else {
+                spawnPickerMarker.setLatLng([lat, lng]);
+            }
+            const text = formatCoordinate(lat, lng);
+            const coordsEl = document.getElementById('spawnPickerCoords');
+            const textEl = document.getElementById('spawnLocationText');
+            if (coordsEl) coordsEl.innerText = text;
+            if (textEl) textEl.innerText = `선택 위치: ${text}`;
+        }
+
+        window.openSpawnPicker = function() {
+            const modal = document.getElementById('spawnPickerModal');
+            if (!modal) return;
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            ensureSpawnPickerMap();
             setTimeout(() => {
-                if (map) map.invalidateSize();
-            }, 100);
+                if (spawnPickerMap) {
+                    spawnPickerMap.invalidateSize();
+                    spawnPickerMap.setView([selectedSpawnLat, selectedSpawnLng], Math.max(spawnPickerMap.getZoom(), 5), { animate: false });
+                }
+            }, 80);
         };
+
+        window.closeSpawnPicker = function() {
+            const modal = document.getElementById('spawnPickerModal');
+            if (!modal) return;
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+        };
+
+        window.confirmSpawnPicker = function() {
+            updateSpawnPickerMarker();
+            closeSpawnPicker();
+        };
+
+        // Leaflet은 세계지도를 반복 표시하므로, 화면에서 클릭한 '세계 복사본'을 보존합니다.
+        // 현재 위치에서 가장 가까운 세계 복사본의 경도를 선택해 경계(+/-180)에서 생기는 오류를 막습니다.
+        function getWorldAwareClickLng(e) {
+            const baseLng = normalizeLongitude(e.latlng.lng);
+            if (!map || !e.layerPoint) return baseLng;
+
+            const zoom = map.getZoom();
+            const targetX = e.layerPoint.x;
+            let bestLng = baseLng;
+            let bestDiff = Infinity;
+
+            for (let k = -2; k <= 2; k++) {
+                const candidateLng = baseLng + 360 * k;
+                const point = map.latLngToLayerPoint(L.latLng(e.latlng.lat, candidateLng));
+                const diff = Math.abs(point.x - targetX);
+                if (diff < bestDiff) {
+                    bestDiff = diff;
+                    bestLng = candidateLng;
+                }
+            }
+            return bestLng;
+        }
 
         function initMap() {
             map = L.map('map', {
@@ -769,23 +876,13 @@
             waypointPolylineGroup = L.layerGroup().addTo(map);
 
             map.on('click', async (e) => {
-                const clickLat = e.latlng.lat;
-                const clickLng = e.latlng.lng;
-
-                if (spawnPickerActive) {
-                    document.getElementById('inputSpawnLat').value = clickLat.toFixed(4);
-                    document.getElementById('inputSpawnLng').value = normalizeLongitude(clickLng).toFixed(4);
-                    const hint = document.getElementById('spawnPickHint');
-                    if (hint) hint.innerText = `선택됨: ${clickLat.toFixed(4)}, ${normalizeLongitude(clickLng).toFixed(4)}`;
-                    spawnPickerActive = false;
-                    document.getElementById('setupModal').classList.remove('hidden');
-                    return;
-                }
+                const clickLat = Math.max(-89.9999, Math.min(89.9999, Number(e.latlng.lat)));
+                const clickLng = getWorldAwareClickLng(e);
 
                 // PILOT MODE: Add Waypoint to My Aircraft
                 if (myRole === 'PILOT') {
                     const wptName = `WPT${waypointSeq++}`;
-                    myAircraft.waypoints.push({ lat: clickLat, lng: normalizeLongitude(clickLng), name: wptName });
+                    myAircraft.waypoints.push({ lat: clickLat, lng: clickLng, name: wptName });
                     document.getElementById('userNextWpt').innerText = myAircraft.waypoints[0].name;
                     drawMyWaypoints();
                 }
@@ -949,7 +1046,6 @@
                 lastTimestamp = now;
 
                 if (myRole === 'PILOT') updateMyPhysics(dt);
-                updateCombatStatusUI();
                 renderAllPlayers(now);
 
                 if (now - lastGameSync > 1000) {
@@ -957,10 +1053,14 @@
                     lastGameSync = now;
                 }
 
-                if (myRole === 'ATC' && trackedUserId) {
+                if (myRole === 'ATC' && trackedUserId && now - lastAtcPanAt >= 120) {
                     const tracked = remotePlayers.get(trackedUserId);
                     if (tracked && isSameAtcChannel(tracked)) {
-                        map.panTo([tracked.lat, tracked.lng], { animate: false });
+                        const trackedRecord = playerMarkers.get(trackedUserId);
+                        const trackedPos = trackedRecord?.marker?.getLatLng();
+                        if (trackedPos) map.panTo(trackedPos, { animate: false });
+                        else map.panTo([tracked.lat, tracked.lng], { animate: false });
+                        lastAtcPanAt = now;
                     } else if (trackedUserId) {
                         clearTrackedAircraft();
                     }
@@ -1073,7 +1173,7 @@
                 lastTelemetryUpdateAt = performance.now();
                 document.getElementById('userAltVal').innerText = `${Math.round(myAircraft.alt).toLocaleString()} FT`;
                 document.getElementById('userHdgVal').innerText = `${Math.round(myAircraft.heading).toString().padStart(3, '0')}°`;
-                document.getElementById('userSpdVal').innerText = `${Math.round(myAircraft.speed)} KT`;
+                document.getElementById('userSpdVal').innerText = `${formatDisplaySpeed(myAircraft.speed)} KT`;
             }
         }
 
@@ -1135,38 +1235,75 @@
             });
         }
 
+        function getAircraftVisual(pData) {
+            const type = String(pData?.aircraftType || 'AIRLINER').toUpperCase();
+            if (pData?.role === 'ATC') return { icon: 'fa-headset', label: 'ATC', color: '#f59e0b' };
+            if (type === 'HELICOPTER') return { icon: 'fa-helicopter', label: 'COMBAT HELI', color: '#f59e0b' };
+            if (type === 'FIGHTER') return { icon: 'fa-jet-fighter', label: 'FIGHTER', color: '#ef4444' };
+            if (type === 'TERRORIST') return { icon: 'fa-plane', label: 'TERRORIST', color: '#b91c1c' };
+            return { icon: 'fa-plane', label: 'AIRLINER', color: '#00f3ff' };
+        }
+
         function buildPlayerIconHtml(pData, isSelf) {
-            const color = pData.isDisabled ? '#ff3344' : (pData.isLanded ? '#9ca3af' : (pData.isEmergency ? '#ff3344' : (pData.role === 'ATC' ? '#f59e0b' : (isSelf ? '#00f3ff' : '#00ff66'))));
-            const typeLabel = pData.role === 'ATC' ? 'ATC' : (pData.aircraftType === 'FIGHTER' ? 'FIGHTER' : (pData.aircraftType === 'HELICOPTER' ? 'COMBAT HELI' : (pData.aircraftType === 'TERRORIST' ? 'TERRORIST' : 'AIRLINER')));
+            const visual = getAircraftVisual(pData);
+            const stateColor = pData.isDisabled || pData.gameOver ? '#ff3344' : (pData.isLanded ? '#9ca3af' : (pData.isEmergency ? '#ff3344' : visual.color));
             return {
-                color,
-                key: [pData.role, pData.aircraftType, pData.isDisabled, pData.isLanded, pData.isEmergency, pData.gameOver, pData.requiresEmergencyLanding, Math.round(Number(pData.heading) || 0), Math.round(Number(pData.alt) || 0), Math.round(Number(pData.speed) || 0), typeLabel, isSelf].join('|'),
+                // heading/위치/고도/속도가 바뀌어도 아이콘 DOM을 다시 만들지 않습니다.
+                key: [pData.role, pData.aircraftType, pData.isDisabled, pData.isLanded, pData.isEmergency, pData.gameOver, pData.requiresEmergencyLanding, isSelf].join('|'),
                 html: `
-                    <div class="relative flex items-start" style="width: 120px;">
-                        <div style="transform: rotate(${pData.heading || 0}deg);" class="w-8 h-8 flex items-center justify-center">
-                            <svg width="22" height="22" viewBox="0 0 24 24" fill="${color}">
-                                <path d="M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z"/>
-                            </svg>
+                    <div class="relative flex items-start" style="width:130px;">
+                        <div class="aircraft-symbol w-9 h-9 flex items-center justify-center" style="color:${visual.color}; transform:rotate(${normalizeHeading(pData.heading || 0)}deg); transform-origin:center; will-change:transform;">
+                            <i class="fa-solid ${visual.icon}" style="font-size:22px; filter:drop-shadow(0 0 3px rgba(0,0,0,.7));"></i>
                         </div>
-                        <div class="ml-1 bg-gray-950/85 px-1.5 py-0.5 rounded border border-gray-800 text-[9px] font-mono leading-tight whitespace-nowrap pointer-events-auto" style="color: ${color}">
+                        <div class="ml-1 bg-gray-950/90 px-1.5 py-0.5 rounded border border-gray-800 text-[9px] font-mono leading-tight whitespace-nowrap pointer-events-none" style="color:${stateColor}">
                             <div class="font-bold flex items-center gap-1">
-                                ${pData.id} [${typeLabel}] ${pData.isLanded ? '<span class="text-gray-400">LANDED</span>' : ''} ${pData.isDisabled || pData.gameOver ? '<span class="text-red-500 font-black">GAME OVER</span>' : ''} ${pData.requiresEmergencyLanding ? '<span class="text-amber-300 font-black">EMERGENCY</span>' : ''} ${pData.isEmergency ? '<span class="text-red-500 font-black animate-ping">!</span>' : ''}
+                                ${pData.id} [${visual.label}] ${pData.isLanded ? '<span class="text-gray-400">LANDED</span>' : ''} ${pData.isDisabled || pData.gameOver ? '<span class="text-red-500 font-black">GAME OVER</span>' : ''} ${pData.requiresEmergencyLanding ? '<span class="text-amber-300 font-black">EMERGENCY</span>' : ''} ${pData.isEmergency ? '<span class="text-red-500 font-black">!</span>' : ''}
                             </div>
-                            <div>ALT ${Math.round(pData.alt || 0).toLocaleString()} FT • FL${Math.round((pData.alt || 0) / 100)} • ${Math.round(pData.speed || 0)}kt</div>
+                            <div>ALT ${Math.round(pData.alt || 0).toLocaleString()} FT • FL${Math.round((pData.alt || 0) / 100)} • ${formatDisplaySpeed(pData.speed || 0)}kt</div>
                         </div>
                     </div>
                 `
             };
         }
 
-        function upsertPlayerMarker(uid, pData, isSelf) {
-            if (!Number.isFinite(Number(pData.lat)) || !Number.isFinite(Number(pData.lng))) return;
-            let record = playerMarkers.get(uid);
+        function getSmoothMarkerState(pData, isSelf, now) {
+            const lat = Number(pData?.lat);
+            const lng = Number(pData?.lng);
+            if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+
+            if (isSelf) {
+                return { lat, lng, heading: normalizeHeading(Number(pData.heading) || 0) };
+            }
+
+            // Firestore 동기화 사이의 1초 정도를 마지막 기수/속도로 화면에서 예측합니다.
+            const lastUpdated = Number(pData.lastUpdated) || now;
+            const ageSec = Math.min(2, Math.max(0, (now - lastUpdated) / 1000));
+            const stopped = Boolean(pData.isLanded || pData.isDisabled || pData.gameOver);
+            const speed = stopped ? 0 : Math.max(0, Number(pData.speed) || 0);
+            const display = { lat, lng: normalizeLongitude(lng) };
+            const distanceNm = (speed / 3600) * ageSec;
+            if (distanceNm > 0) moveGreatCircle(display, distanceNm, Number(pData.heading) || 0);
+            return {
+                lat: display.lat,
+                lng: display.lng,
+                heading: normalizeHeading(Number(pData.heading) || 0)
+            };
+        }
+
+        function upsertPlayerMarker(uid, pData, isSelf, now = performance.now()) {
+            if (!map) return;
+            const display = getSmoothMarkerState(pData, isSelf, now);
+            if (!display) return;
+
             const iconData = buildPlayerIconHtml(pData, isSelf);
+            let record = playerMarkers.get(uid);
 
             if (!record) {
-                const customIcon = L.divIcon({ html: iconData.html, className: '', iconSize: [80, 50], iconAnchor: [15, 15] });
-                const marker = L.marker([pData.lat, pData.lng], { icon: customIcon }).addTo(map);
+                const marker = L.marker([display.lat, display.lng], {
+                    icon: L.divIcon({ html: iconData.html, className: '', iconSize: [130, 50], iconAnchor: [15, 15] }),
+                    keyboard: false
+                }).addTo(map);
+
                 marker.on('click', () => {
                     const current = uid === myUserId ? myAircraft : remotePlayers.get(uid);
                     if (!current) return;
@@ -1178,14 +1315,28 @@
                         selectCombatTarget(uid);
                     }
                 });
-                playerMarkers.set(uid, { marker, iconKey: iconData.key });
-                return;
-            }
 
-            record.marker.setLatLng([pData.lat, pData.lng]);
-            if (record.iconKey !== iconData.key) {
-                record.marker.setIcon(L.divIcon({ html: iconData.html, className: '', iconSize: [80, 50], iconAnchor: [15, 15] }));
-                record.iconKey = iconData.key;
+                record = {
+                    marker,
+                    iconKey: iconData.key,
+                    symbolEl: marker.getElement()?.querySelector('.aircraft-symbol') || null
+                };
+                playerMarkers.set(uid, record);
+            } else {
+                record.marker.setLatLng([display.lat, display.lng]);
+                if (!record.symbolEl || !record.symbolEl.isConnected) {
+                    record.symbolEl = record.marker.getElement()?.querySelector('.aircraft-symbol') || null;
+                }
+                if (record.symbolEl) {
+                    record.symbolEl.style.transform = `rotate(${display.heading}deg)`;
+                }
+
+                // 기체 종류/상태가 바뀔 때만 아이콘 DOM을 교체합니다.
+                if (record.iconKey !== iconData.key) {
+                    record.marker.setIcon(L.divIcon({ html: iconData.html, className: '', iconSize: [130, 50], iconAnchor: [15, 15] }));
+                    record.iconKey = iconData.key;
+                    record.symbolEl = record.marker.getElement()?.querySelector('.aircraft-symbol') || null;
+                }
             }
         }
 
@@ -1198,21 +1349,42 @@
         }
 
         function drawMyWaypoints() {
+            if (!waypointPolylineGroup) return;
             waypointPolylineGroup.clearLayers();
-            if (myAircraft.waypoints.length === 0) return;
+            if (!Array.isArray(myAircraft.waypoints) || myAircraft.waypoints.length === 0) return;
 
-            const coords = [[myAircraft.lat, myAircraft.lng]];
+            const routePoints = [[Number(myAircraft.lat), normalizeLongitude(Number(myAircraft.lng))]];
+
             myAircraft.waypoints.forEach(wpt => {
-                coords.push([wpt.lat, wpt.lng]);
+                if (!isValidWaypoint(wpt)) return;
+                const lat = Number(wpt.lat);
+                const lng = normalizeLongitude(Number(wpt.lng));
+                routePoints.push([lat, lng]);
+
                 const wptIcon = L.divIcon({
-                    html: `<div class="bg-cyan-500 text-gray-950 font-bold text-[9px] px-1 rounded shadow-md border border-cyan-300 font-mono">${wpt.name}</div>`,
+                    html: `<div class="bg-cyan-500 text-gray-950 font-bold text-[9px] px-1 rounded shadow-md border border-cyan-300 font-mono">${String(wpt.name || 'WPT')}</div>`,
                     className: '',
                     iconAnchor: [15, 10]
                 });
-                L.marker([wpt.lat, wpt.lng], { icon: wptIcon }).addTo(waypointPolylineGroup);
+                L.marker([lat, lng], { icon: wptIcon }).addTo(waypointPolylineGroup);
             });
 
-            L.polyline(coords, { color: '#00f3ff', weight: 2, dashArray: '4, 4' }).addTo(waypointPolylineGroup);
+            // +/-180도 경계를 넘는 선은 두 개의 선분으로 나눠서
+            // 세계 반대편까지 길게 이어지는 현상을 방지합니다.
+            let segment = [routePoints[0]];
+            for (let i = 1; i < routePoints.length; i++) {
+                const prev = routePoints[i - 1];
+                const cur = routePoints[i];
+                if (Math.abs(cur[1] - prev[1]) > 180) {
+                    L.polyline(segment, { color: '#00f3ff', weight: 2, dashArray: '4, 4' }).addTo(waypointPolylineGroup);
+                    segment = [cur];
+                } else {
+                    segment.push(cur);
+                }
+            }
+            if (segment.length >= 2) {
+                L.polyline(segment, { color: '#00f3ff', weight: 2, dashArray: '4, 4' }).addTo(waypointPolylineGroup);
+            }
         }
 
         // --- ATC Controller & Callsigns ---
@@ -1272,7 +1444,7 @@
                     <div>현재 고도: <span class="text-cyan-300">${Math.round(target.alt || 0).toLocaleString()} FT</span></div>
                     <div>목표 고도: <span class="text-amber-300">${Math.round(target.targetAlt || target.alt || 0).toLocaleString()} FT</span></div>
                     <div>기수: <span class="text-cyan-300">${Math.round(target.heading)}°</span></div>
-                    <div>속도: <span class="text-cyan-300">${Math.round(target.speed)} KT</span></div>
+                    <div>속도: <span class="text-cyan-300">${formatDisplaySpeed(target.speed)} KT</span></div>
                 </div>
             `;
 
