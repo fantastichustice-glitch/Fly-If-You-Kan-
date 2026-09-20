@@ -251,7 +251,7 @@
                 </div>
                 <div class="bg-gray-950/60 p-2 rounded-lg border border-gray-800">
                     <div class="text-[10px] text-gray-400">SPEED</div>
-                    <div id="userSpdVal" class="text-sm font-bold text-cyan-300 mono">450 KT</div>
+                    <div id="userSpdVal" class="text-sm font-bold text-cyan-300 mono">63,000 KT</div>
                 </div>
             </div>
 
@@ -465,10 +465,10 @@
     </div>
 
     <!-- FIREBASE & MULTIPLAYER LOGIC -->
-    <script type="module">        
+    <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, onSnapshot, collection, deleteDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getFunctions, httpsCallable } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-functions.js";
 
         // --- Firebase Config & Globals ---
         // 실제 Firebase 프로젝트: fly-if-you-can
@@ -483,7 +483,7 @@
             measurementId: 'G-L47JZ2DKB4'
         };
         
-        let app, db, auth;
+        let app, auth, functions, gameApi;
         let firebaseReady = false;
         let firebaseInitError = null;
         let firebaseInitPromise = null;
@@ -496,46 +496,44 @@
         let combatTargetUserId = null;
         let radioUnsubscribe = null;
 
-        const DEFAULT_ACCESS_PASSWORDS = {
-            AIR_FORCE_TRAINING: 'airforce',
-            ATC_TRAINING: 'atc',
-            FLIGHT_TRAINING: 'flight',
-            FIGHTER: 'fighter',
-            ATC: 'controller'
-        };
-        let accessPasswords = { ...DEFAULT_ACCESS_PASSWORDS };
+        // 보안 비밀번호는 브라우저/Firestore의 일반 문서에 평문으로 저장하지 않습니다.
+        // 입력값을 SHA-256으로 변환한 뒤, Firestore Security Rules가 보호된
+        // access_control/security 문서의 해시와 비교해 세션을 승인합니다.
         let verifiedServerId = null;
         let verifiedServerPassword = false;
         let verifiedAtcPassword = false;
         let verifiedFighterPassword = false;
-        const PASSWORD_DOC_PATH = ['access_control', 'passwords'];
-        // 마스터 키 원문은 코드에 저장하지 않습니다.
-        // Firestore의 access_control/security.masterHash와 Rules를 통해 검증합니다.
-        const MASTER_SECURITY_DOC_PATH = ['access_control', 'security'];
-        const MASTER_VERIFY_COLLECTION = 'masterKeyChecks';
-        let masterVerifiedThisSession = false;
+        let accessSession = null;
+        const SESSION_TTL_MS = 15 * 60 * 1000;
+
+        async function callGameApi(action, data = {}) {
+            if (!gameApi) throw new Error('게임 서버 API가 초기화되지 않았습니다.');
+            const result = await gameApi({ action, ...data });
+            return result.data;
+        }
+
+        async function sha256Hex(value) {
+            const data = new TextEncoder().encode(String(value));
+            const hash = await crypto.subtle.digest('SHA-256', data);
+            return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        async function authorizeSession({ server = null, role = null, aircraftType = null, password }) {
+            if (!auth?.currentUser) throw new Error('Firebase 인증이 필요합니다.');
+            const result = await callGameApi('authorize', { server, role, aircraftType, password });
+            const expiresAt = Number(result?.expiresAt) || (Date.now() + SESSION_TTL_MS);
+            accessSession = { server, role, aircraftType, expiresAt };
+            return true;
+        }
+
+        function sessionIsFresh() {
+            return accessSession && Number(accessSession.expiresAt) > Date.now();
+        }
         let playersUnsubscribe = null;
         const PRESENCE_TIMEOUT_MS = 12000;
 
-        function getPasswordDocRef() {
-            return doc(db, ...PASSWORD_DOC_PATH);
-        }
-
         // Local Simulation State for My Aircraft (if Pilot)
-        const AIRLINER_CRUISE_SPEED_KT = 45000; // 일반기: 답답하지 않게 빠른 게임 속도
-        const FIGHTER_CRUISE_SPEED_KT = 63000; // 전투기: 일반기보다 빠른 게임 속도
-
-        function getCruiseSpeedForAircraft(type = myAircraftType) {
-            return type === 'FIGHTER' ? FIGHTER_CRUISE_SPEED_KT : AIRLINER_CRUISE_SPEED_KT;
-        }
-
-        // 실제 이동 속도는 그대로 유지하고 계기에는 현실적인 표시값을 보여줍니다.
-        // AIRLINER 45,000 -> 450 KT / FIGHTER 63,000 -> 630 KT
-        const DISPLAY_SPEED_DIVISOR = 100;
-        function getDisplayedSpeedKt(physicalSpeedKt) {
-            const value = Number(physicalSpeedKt) || 0;
-            return Math.max(0, Math.round(value / DISPLAY_SPEED_DIVISOR));
-        }
+        const GAME_CRUISE_SPEED_KT = 63000; // 게임 내 빠른 이동 속도
 
         let myAircraft = {
             id: myCallsign,
@@ -543,8 +541,8 @@
             lng: 126.44 + (Math.random() - 0.5) * 0.5,
             alt: 12000,
             targetAlt: 12000,
-            speed: AIRLINER_CRUISE_SPEED_KT,
-            targetSpeed: AIRLINER_CRUISE_SPEED_KT,
+            speed: GAME_CRUISE_SPEED_KT,
+            targetSpeed: GAME_CRUISE_SPEED_KT,
             heading: 90,
             targetHeading: 90,
             squawk: "7000",
@@ -570,26 +568,22 @@
         let lastTimestamp = performance.now();
         let trackedUserId = null;
         let waypointSeq = 1;
-        let lastAtcRouteCommandAt = 0;
 
         window.selectRole = async function(role) {
             if (role === 'ATC' && !verifiedAtcPassword) {
-                try {
-                    await initFirebaseCore();
-                } catch (err) {
-                    const code = err?.code ? `\n오류 코드: ${err.code}` : '';
-                    alert(`Firebase 인증/암호 정보를 불러오지 못했습니다.${code}\n\n${err?.message || err}`);
-                    console.error('ATC password load failed:', err);
-                    return;
+                try { await initFirebaseCore(); } catch (err) {
+                    alert(`Firebase 인증에 실패했습니다.\n\n${err?.message || err}`); return;
                 }
-
                 const entered = prompt('관제사 선택 암호를 입력하세요.');
                 if (entered === null) return;
-                if (entered.trim() !== accessPasswords.ATC) {
-                    alert('관제사 암호가 올바르지 않습니다.');
+                try {
+                    await authorizeSession({ role: 'ATC', password: entered });
+                    verifiedAtcPassword = true;
+                } catch (err) {
+                    alert('관제사 암호가 올바르지 않거나 권한 확인에 실패했습니다.');
+                    console.error('ATC authorization failed:', err);
                     return;
                 }
-                verifiedAtcPassword = true;
             }
             myRole = role;
             const btnPilot = document.getElementById('roleBtnPilot');
@@ -605,32 +599,21 @@
 
         window.selectAircraftType = async function(type) {
             if (type === 'FIGHTER' && !verifiedFighterPassword) {
-                try {
-                    // 새로고침 직후에도 Firebase에 저장된 최신 전투기 암호를 먼저 불러옵니다.
-                    await initFirebaseCore();
-                } catch (err) {
-                    const code = err?.code ? `\n오류 코드: ${err.code}` : '';
-                    alert(`Firebase 인증/암호 정보를 불러오지 못했습니다.${code}\n\n${err?.message || err}`);
-                    console.error('Fighter password load failed:', err);
-                    return;
+                try { await initFirebaseCore(); } catch (err) {
+                    alert(`Firebase 인증에 실패했습니다.\n\n${err?.message || err}`); return;
                 }
-
                 const entered = prompt('전투기 선택 암호를 입력하세요.');
                 if (entered === null) return;
-                if (entered.trim() !== accessPasswords.FIGHTER) {
-                    alert('전투기 암호가 올바르지 않습니다.');
+                try {
+                    await authorizeSession({ role: 'PILOT', aircraftType: 'FIGHTER', password: entered });
+                    verifiedFighterPassword = true;
+                } catch (err) {
+                    alert('전투기 암호가 올바르지 않거나 권한 확인에 실패했습니다.');
+                    console.error('Fighter authorization failed:', err);
                     return;
                 }
-                verifiedFighterPassword = true;
             }
             myAircraftType = type;
-            myAircraft.aircraftType = type;
-            if (myRole === 'PILOT' && !myAircraft.isLanded) {
-                myAircraft.speed = getCruiseSpeedForAircraft(type);
-                myAircraft.targetSpeed = getCruiseSpeedForAircraft(type);
-            }
-            const spdEl = document.getElementById('userSpdVal');
-            if (spdEl) spdEl.innerText = `${getDisplayedSpeedKt(myAircraft.speed)} KT`;
             const civil = document.getElementById('typeBtnCivil');
             const fighter = document.getElementById('typeBtnFighter');
             if (type === 'FIGHTER') {
@@ -660,15 +643,18 @@
 
             const selectedServer = (document.getElementById('inputServer').value || 'GLOBAL').trim().toUpperCase();
             if (['AIR_FORCE_TRAINING', 'ATC_TRAINING', 'FLIGHT_TRAINING'].includes(selectedServer)) {
-                if (verifiedServerId !== selectedServer || !verifiedServerPassword) {
+                if (verifiedServerId !== selectedServer || !verifiedServerPassword || !sessionIsFresh()) {
                     const entered = prompt('이 훈련 서버는 암호가 필요합니다. 서버 암호를 입력하세요.');
                     if (entered === null) return;
-                    if (entered.trim() !== accessPasswords[selectedServer]) {
-                        alert('서버 암호가 올바르지 않습니다.');
+                    try {
+                        await authorizeSession({ server: selectedServer, role: myRole, aircraftType: myAircraftType, password: entered });
+                        verifiedServerId = selectedServer;
+                        verifiedServerPassword = true;
+                    } catch (err) {
+                        alert('서버 암호가 올바르지 않거나 권한 확인에 실패했습니다.');
+                        console.error('Server authorization failed:', err);
                         return;
                     }
-                    verifiedServerId = selectedServer;
-                    verifiedServerPassword = true;
                 }
             } else {
                 verifiedServerId = selectedServer;
@@ -690,10 +676,6 @@
             atcChannel = (document.getElementById('inputAtcChannel').value || '120.5').trim().toUpperCase();
             myAircraft.id = myCallsign;
             myAircraft.aircraftType = myAircraftType;
-            if (myRole === 'PILOT' && !myAircraft.isLanded) {
-                myAircraft.speed = getCruiseSpeedForAircraft(myAircraftType);
-                myAircraft.targetSpeed = getCruiseSpeedForAircraft(myAircraftType);
-            }
             myAircraft.atcChannel = atcChannel;
             document.getElementById('pilotAltInput').value = Math.round(myAircraft.targetAlt);
             document.getElementById('pilotTargetAltVal').innerText = `목표 ${Math.round(myAircraft.targetAlt).toLocaleString()} FT`;
@@ -735,6 +717,7 @@
             }
 
             if (!map) initMap();
+            await pushMyStateToFirestore();
             startPhysicsAndSyncLoop();
             // 접속 시스템 메시지는 ATC 기록에 남기지 않습니다.
         };
@@ -743,11 +726,6 @@
         function normalizeLongitude(lng) {
             return ((lng + 180) % 360 + 360) % 360 - 180;
         }
-
-        // MapTiler API 키를 여기에 넣으세요.
-        // 웹 앱에서는 키가 브라우저에 노출되므로 MapTiler에서
-        // Allowed HTTP origins로 게임 주소를 제한하는 것을 권장합니다.
-        const MAPTILER_API_KEY = "${FIYC_API_KEY}";
 
         function initMap() {
             map = L.map('map', {
@@ -758,13 +736,11 @@
                 attributionControl: true
             });
 
-            L.tileLayer(`https://api.maptiler.com/maps/dataviz-dark/{z}/{x}/{y}.png?key=${encodeURIComponent(MAPTILER_API_KEY)}`, {
-                tileSize: 512,
-                zoomOffset: -1,
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                subdomains: 'abcd',
                 maxZoom: 14,
-                minZoom: 1,
-                attribution: '&copy; MapTiler &copy; OpenStreetMap contributors',
-                crossOrigin: true
+                minZoom: 4,
+                attribution: '&copy; OpenStreetMap &copy; CARTO'
             }).addTo(map);
 
             L.control.zoom({ position: 'bottomleft' }).addTo(map);
@@ -777,7 +753,7 @@
                 // PILOT MODE: Add Waypoint to My Aircraft
                 if (myRole === 'PILOT') {
                     const wptName = `WPT${waypointSeq++}`;
-                    myAircraft.waypoints.push({ lat: clickLat, lng: normalizeLongitude(clickLng), name: wptName });
+                    myAircraft.waypoints.push({ lat: clickLat, lng: clickLng, name: wptName });
                     document.getElementById('userNextWpt').innerText = myAircraft.waypoints[0].name;
                     drawMyWaypoints();
                 }
@@ -786,24 +762,15 @@
                     const targetPlayer = remotePlayers.get(trackedUserId);
                     if (targetPlayer && targetPlayer.role === 'PILOT') {
                         const wptName = `ATC_WPT${waypointSeq++}`;
-                        const commandAt = Date.now();
+                        targetPlayer.waypoints = [{ lat: clickLat, lng: clickLng, name: wptName }];
+                        targetPlayer.isHolding = false;
                         try {
-                            // 대상 조종사의 현재 상태 전체를 덮어쓰지 않고
-                            // '항로 지시'만 병합합니다. 초고속 비행 중인 조종사의
-                            // 2초 heartbeat와 충돌해 항로가 사라지는 문제를 방지합니다.
-                            const targetRef = doc(db, 'servers', serverId, 'players', trackedUserId);
-                            await setDoc(targetRef, {
-                                atcRouteCommand: {
-                                    issuedAt: commandAt,
-                                    waypoints: [{ lat: clickLat, lng: normalizeLongitude(clickLng), name: wptName }],
-                                    isHolding: false
-                                }
-                            }, { merge: true });
-                        } catch (e) {
-                            console.error('ATC direct waypoint update failed:', e);
-                            return;
+                            await callGameApi('commandPlayer', { serverId, targetUid: trackedUserId, patch: { waypoints: targetPlayer.waypoints, isHolding: false } });
+                            logRadio(targetPlayer.id, `관제 지시: [${wptName}] 포인트로 직항(Direct) 진행.`);
+                        } catch (err) {
+                            console.error('ATC direct command failed:', err);
+                            alert('관제 직항 명령이 서버에서 거부되었습니다.');
                         }
-                        logRadio(targetPlayer.id, `관제 지시: [${wptName}] 포인트로 직항(Direct) 진행.`);
                     }
                 }
             });
@@ -815,8 +782,9 @@
 
             firebaseInitPromise = (async () => {
                 if (!app) app = initializeApp(firebaseConfig);
-                if (!db) db = getFirestore(app);
                 if (!auth) auth = getAuth(app);
+                if (!functions) functions = getFunctions(app, 'asia-northeast3');
+                if (!gameApi) gameApi = httpsCallable(functions, 'gameApi');
 
                 let credential;
                 if (auth.currentUser) {
@@ -832,7 +800,6 @@
                 }
 
                 myUserId = credential.user.uid;
-                // 일반 게임용 접근 암호만 읽습니다. 마스터키 원문/해시는 읽지 않습니다.
                 await loadAccessPasswords();
                 firebaseReady = true;
                 firebaseInitError = null;
@@ -846,167 +813,109 @@
         }
 
         async function subscribeToServerSync() {
-            if (!db || !auth || !auth.currentUser) {
+            if (!auth?.currentUser || !gameApi) {
                 throw new Error('Firebase 인증이 완료되지 않았습니다.');
             }
 
             if (playersUnsubscribe) {
-                playersUnsubscribe();
+                clearInterval(playersUnsubscribe);
                 playersUnsubscribe = null;
             }
             if (radioUnsubscribe) {
-                radioUnsubscribe();
+                clearInterval(radioUnsubscribe);
                 radioUnsubscribe = null;
             }
 
             remotePlayers.clear();
-            const playersCol = collection(db, 'servers', serverId, 'players');
-            playersUnsubscribe = onSnapshot(playersCol, (snapshot) => {
-                // Firestore documents remain after a browser is closed.
-                // Only treat recently-updated players as online, and collapse duplicate
-                // callsigns so an old session cannot appear as a second aircraft.
-                const now = Date.now();
-                const latestByCallsign = new Map();
 
-                snapshot.forEach(docSnap => {
-                    const data = docSnap.data() || {};
-                    const uid = docSnap.id;
+            const refresh = async () => {
+                try {
+                    const state = await callGameApi('getServerState', { serverId, channel: atcChannel });
+                    const players = Array.isArray(state?.players) ? state.players : [];
+                    const messages = Array.isArray(state?.radio) ? state.radio : [];
+                    const now = Date.now();
+                    const latestByCallsign = new Map();
 
-                    // ATC가 내 기체에 보낸 '직항 웨이포인트' 명령만 읽습니다.
-                    // 내 기체의 위치/속도 등 로컬 물리 상태는 서버 스냅샷으로 덮어쓰지 않습니다.
-                    if (uid === myUserId) {
-                        const cmd = data.atcRouteCommand;
-                        const commandAt = Number(cmd?.issuedAt) || 0;
-                        if (myRole === 'PILOT' && commandAt > lastAtcRouteCommandAt && Array.isArray(cmd?.waypoints)) {
-                            myAircraft.waypoints = cmd.waypoints.map(w => ({
-                                lat: Number(w.lat),
-                                lng: normalizeLongitude(Number(w.lng)),
-                                name: String(w.name || `ATC_WPT${commandAt}`)
-                            })).filter(w => Number.isFinite(w.lat) && Number.isFinite(w.lng));
-                            myAircraft.isHolding = Boolean(cmd.isHolding);
-                            myAircraft.atcRouteCommand = cmd;
-                            lastAtcRouteCommandAt = commandAt;
-
-                            const nextWptEl = document.getElementById('userNextWpt');
-                            if (nextWptEl) nextWptEl.innerText = myAircraft.waypoints[0]?.name || 'DIRECT HEADING';
-                            drawMyWaypoints();
+                    for (const item of players) {
+                        const uid = item.uid;
+                        const data = item.data || {};
+                        if (!uid || uid === myUserId) continue;
+                        const lastSeen = Number(data.lastUpdated) || 0;
+                        if (!lastSeen || now - lastSeen > PRESENCE_TIMEOUT_MS) continue;
+                        const callsign = String(data.id || uid).trim().toUpperCase();
+                        const existing = latestByCallsign.get(callsign);
+                        if (!existing || lastSeen > existing.data.lastUpdated) {
+                            latestByCallsign.set(callsign, { uid, data: { ...data, lng: normalizeLongitude(Number(data.lng) || 0), lastUpdated: lastSeen } });
                         }
-                        return;
                     }
 
-                    const lastSeen = Number(data.lastUpdated) || 0;
-                    if (!lastSeen || now - lastSeen > PRESENCE_TIMEOUT_MS) return;
+                    const activeIds = new Set();
+                    remotePlayers.clear();
+                    latestByCallsign.forEach(({ uid, data }) => {
+                        activeIds.add(uid);
+                        remotePlayers.set(uid, data);
+                    });
 
-                    const callsign = String(data.id || uid).trim().toUpperCase();
-                    const existing = latestByCallsign.get(callsign);
-                    if (!existing || lastSeen > existing.data.lastUpdated) {
-                        latestByCallsign.set(callsign, { uid, data: { ...data, lng: normalizeLongitude(Number(data.lng) || 0), lastUpdated: lastSeen } });
+                    for (const [uid] of playerMarkers.entries()) {
+                        if (uid !== myUserId && !activeIds.has(uid)) removePlayerMarker(uid);
                     }
-                });
+                    updatePlayersUIList();
 
-                const activeIds = new Set();
-                remotePlayers.clear();
-                latestByCallsign.forEach(({ uid, data }) => {
-                    activeIds.add(uid);
-                    remotePlayers.set(uid, data);
-                });
-
-                // Remove markers for players that are stale, disconnected,
-                // or hidden because a newer session uses the same callsign.
-                for (const [uid] of playerMarkers.entries()) {
-                    if (uid !== myUserId && !activeIds.has(uid)) {
-                        removePlayerMarker(uid);
-                    }
+                    const logBox = document.getElementById('atcRadioLog');
+                    logBox.innerHTML = '';
+                    messages.slice(-80).forEach(m => appendRadioMessage(m.sender, m.text, m.timestamp));
+                    logBox.scrollTop = logBox.scrollHeight;
+                    document.getElementById('connStatusDot').className = 'w-3 h-3 rounded-full bg-emerald-400 pulse-green';
+                } catch (error) {
+                    console.error('Game server sync error:', error);
+                    document.getElementById('connStatusDot').className = 'w-3 h-3 rounded-full bg-red-500';
                 }
+            };
 
-                updatePlayersUIList();
-            }, (error) => {
-                console.error('Firestore player sync error:', error);
-            });
-
-            const radioCol = collection(db, 'servers', serverId, 'radio');
-            radioUnsubscribe = onSnapshot(radioCol, (snapshot) => {
-                const messages = [];
-                snapshot.forEach(d => {
-                    const m = d.data();
-                    if ((m.channel || '') === atcChannel && isConversationRadioMessage(m.sender, m.text)) messages.push(m);
-                });
-                messages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-                const logBox = document.getElementById('atcRadioLog');
-                logBox.innerHTML = '';
-                messages.slice(-80).forEach(m => appendRadioMessage(m.sender, m.text, m.timestamp));
-                logBox.scrollTop = logBox.scrollHeight;
-            }, (error) => console.error('Radio sync error:', error));
-
-            document.getElementById('connStatusDot').className = 'w-3 h-3 rounded-full bg-emerald-400 pulse-green';
+            await refresh();
+            playersUnsubscribe = setInterval(refresh, 1000);
         }
 
         async function initFirebaseAndSync() {
-            if (!firebaseReady) {
-                try {
-                    await initFirebaseCore();
-                } catch (err) {
-                    firebaseReady = false;
-                    firebaseInitError = err;
-                    document.getElementById('connStatusDot').className = 'w-3 h-3 rounded-full bg-red-500';
-                    console.error('Firebase init failed:', err);
-                    throw err;
-                }
-            }
+            if (!firebaseReady) await initFirebaseCore();
             await subscribeToServerSync();
         }
 
         window.addEventListener('pagehide', () => {
-            // Best-effort cleanup when the page is closed or refreshed.
-            // The timeout-based presence check above is the reliable fallback.
-            try {
-                if (db && auth && auth.currentUser && serverId && myUserId) {
-                    const ref = doc(db, 'servers', serverId, 'players', myUserId);
-                    deleteDoc(ref).catch(() => {});
-                }
-            } catch (_) {}
+            // Firestore를 브라우저에서 직접 삭제하지 않습니다.
+            // 서버는 lastUpdated 타임아웃으로 오프라인 플레이어를 정리합니다.
         });
 
         async function pushMyStateToFirestore() {
-            if (!db || !auth || !auth.currentUser) return;
+            if (!auth?.currentUser || !gameApi || !serverId) return;
             try {
                 myAircraft.role = myRole;
                 myAircraft.online = true;
                 myAircraft.lastUpdated = Date.now();
-                const docRef = doc(db, 'servers', serverId, 'players', myUserId);
-                await setDoc(docRef, myAircraft);
+                await callGameApi('upsertPlayer', { serverId, player: myAircraft });
             } catch (e) {
-                // Ignore silent network jitter
+                console.error('Game state sync failed:', e);
             }
         }
 
         function startPhysicsAndSyncLoop() {
-            let lastFirestoreSync = 0;
+            let lastGameSync = 0;
 
             function loop(now) {
                 const dt = Math.min((now - lastTimestamp) / 1000, 0.2);
                 lastTimestamp = now;
 
-                // If Pilot, update local physics
-                if (myRole === 'PILOT') {
-                    updateMyPhysics(dt);
-                }
-
-                // Render all players (My aircraft + remote players)
+                if (myRole === 'PILOT') updateMyPhysics(dt);
                 renderAllPlayers();
 
-                // Heartbeat for online presence. This also keeps ATC sessions visible.
-                if (now - lastFirestoreSync > 2000) {
+                if (now - lastGameSync > 2000) {
                     pushMyStateToFirestore();
-                    lastFirestoreSync = now;
+                    lastGameSync = now;
                 }
 
-                // Camera tracking in ATC mode
                 if (myRole === 'ATC' && trackedUserId) {
                     const tracked = remotePlayers.get(trackedUserId);
-                    if (tracked) {
-                        map.panTo([tracked.lat, tracked.lng], { animate: false });
-                    }
+                    if (tracked) map.panTo([tracked.lat, tracked.lng], { animate: false });
                 }
 
                 requestAnimationFrame(loop);
@@ -1025,103 +934,47 @@
             // Holding
             if (myAircraft.isHolding) {
                 myAircraft.targetHeading = (myAircraft.targetHeading + 3 * dt) % 360;
-            }
-
-            // Position calculation.
-            // 웨이포인트가 있을 때는 '현재 위치 -> 다음 웨이포인트' 방향으로
-            // 대권항법(구면 좌표) 이동을 사용합니다. 이렇게 하면 전투기 속도가
-            // 매우 빨라도 한 프레임에 웨이포인트를 지나쳐 버리는 문제가 없습니다.
-            let remainingNm = (myAircraft.speed / 3600) * dt;
-            let routeChanged = false;
-
-            while (!myAircraft.isHolding && myAircraft.waypoints.length > 0 && remainingNm > 0) {
+            } 
+            // Waypoints navigation
+            else if (myAircraft.waypoints.length > 0) {
                 const targetWpt = myAircraft.waypoints[0];
                 const distNm = getDistanceNm(myAircraft.lat, myAircraft.lng, targetWpt.lat, targetWpt.lng);
 
-                if (distNm <= 0.05) {
-                    myAircraft.lat = targetWpt.lat;
-                    myAircraft.lng = normalizeLongitude(targetWpt.lng);
+                if (distNm < 1.2) {
                     myAircraft.waypoints.shift();
-                    routeChanged = true;
-                    continue;
-                }
-
-                myAircraft.targetHeading = getBearing(
-                    myAircraft.lat, myAircraft.lng,
-                    targetWpt.lat, targetWpt.lng
-                );
-                myAircraft.heading = myAircraft.targetHeading;
-
-                if (remainingNm >= distNm) {
-                    // 웨이포인트에 정확히 도착시키고 남은 이동량으로 다음
-                    // 웨이포인트까지 계속 진행합니다.
-                    myAircraft.lat = targetWpt.lat;
-                    myAircraft.lng = normalizeLongitude(targetWpt.lng);
-                    remainingNm -= distNm;
-                    myAircraft.waypoints.shift();
-                    routeChanged = true;
+                    drawMyWaypoints();
+                    if (myAircraft.waypoints.length === 0) {
+                        document.getElementById('userNextWpt').innerText = "DIRECT HEADING";
+                    }
                 } else {
-                    moveGreatCircle(myAircraft, remainingNm, myAircraft.targetHeading);
-                    remainingNm = 0;
+                    myAircraft.targetHeading = getBearing(myAircraft.lat, myAircraft.lng, targetWpt.lat, targetWpt.lng);
                 }
             }
 
-            // 웨이포인트가 없으면 현재 기수 방향으로 이동합니다.
-            if (!myAircraft.isHolding && myAircraft.waypoints.length === 0 && remainingNm > 0) {
-                myAircraft.heading = ((myAircraft.heading % 360) + 360) % 360;
-                myAircraft.targetHeading = myAircraft.heading;
-                moveGreatCircle(myAircraft, remainingNm, myAircraft.heading);
-                remainingNm = 0;
-            }
-
-            // Hold 중에는 현재 기수 방향으로 비행하며 선회합니다.
-            if (myAircraft.isHolding && remainingNm > 0) {
-                myAircraft.heading = ((myAircraft.targetHeading % 360) + 360) % 360;
-                moveGreatCircle(myAircraft, remainingNm, myAircraft.heading);
-                remainingNm = 0;
-            }
-
-            if (routeChanged) {
-                const nextWptEl = document.getElementById('userNextWpt');
-                if (nextWptEl) nextWptEl.innerText = myAircraft.waypoints[0]?.name || 'DIRECT HEADING';
-                drawMyWaypoints();
+            // Smooth Heading Turn
+            let angleDiff = (myAircraft.targetHeading - myAircraft.heading + 540) % 360 - 180;
+            if (Math.abs(angleDiff) > 0.1) {
+                const turnStep = Math.sign(angleDiff) * Math.min(Math.abs(angleDiff), 3.5 * dt);
+                myAircraft.heading = (myAircraft.heading + turnStep + 360) % 360;
             }
 
             // 고도는 목표값으로 즉시 변경
             myAircraft.alt = myAircraft.targetAlt;
 
+            // Position calculation
+            const speedNmPerSec = myAircraft.speed / 3600;
+            const distanceMovedNm = speedNmPerSec * dt;
+            const rad = myAircraft.heading * (Math.PI / 180);
+            const dLat = (distanceMovedNm / 60) * Math.cos(rad);
+            const dLng = (distanceMovedNm / (60 * Math.cos(myAircraft.lat * Math.PI / 180))) * Math.sin(rad);
+
+            myAircraft.lat += dLat;
+            myAircraft.lng = normalizeLongitude(myAircraft.lng + dLng);
+
             // Update Pilot HUD telemetry
             document.getElementById('userAltVal').innerText = `${Math.round(myAircraft.alt).toLocaleString()} FT`;
             document.getElementById('userHdgVal').innerText = `${Math.round(myAircraft.heading).toString().padStart(3, '0')}°`;
-            document.getElementById('userSpdVal').innerText = `${getDisplayedSpeedKt(myAircraft.speed)} KT`;
-        }
-
-        function moveGreatCircle(aircraft, distanceNm, bearingDeg) {
-            if (!(distanceNm > 0)) return;
-
-            const earthRadiusNm = 3440.065;
-            const angularDistance = distanceNm / earthRadiusNm;
-            const bearing = bearingDeg * Math.PI / 180;
-            const lat1 = aircraft.lat * Math.PI / 180;
-            const lon1 = aircraft.lng * Math.PI / 180;
-
-            const sinLat1 = Math.sin(lat1);
-            const cosLat1 = Math.cos(lat1);
-            const sinAd = Math.sin(angularDistance);
-            const cosAd = Math.cos(angularDistance);
-
-            const lat2 = Math.asin(
-                sinLat1 * cosAd +
-                cosLat1 * sinAd * Math.cos(bearing)
-            );
-
-            const lon2 = lon1 + Math.atan2(
-                Math.sin(bearing) * sinAd * cosLat1,
-                cosAd - sinLat1 * Math.sin(lat2)
-            );
-
-            aircraft.lat = Math.max(-89.9999, Math.min(89.9999, lat2 * 180 / Math.PI));
-            aircraft.lng = normalizeLongitude(lon2 * 180 / Math.PI);
+            document.getElementById('userSpdVal').innerText = `${Math.round(myAircraft.speed)} KT`;
         }
 
         function renderAllPlayers() {
@@ -1153,7 +1006,7 @@
                         <div class="font-bold flex items-center gap-1">
                             ${pData.id} [${typeLabel}] ${pData.isLanded ? '<span class="text-gray-400">LANDED</span>' : ''} ${pData.isEmergency ? '<span class="text-red-500 font-black animate-ping">!</span>' : ''}
                         </div>
-                        <div>ALT ${Math.round(pData.alt || 0).toLocaleString()} FT • FL${Math.round((pData.alt || 0) / 100)} • ${getDisplayedSpeedKt(pData.speed || 0)}kt</div>
+                        <div>ALT ${Math.round(pData.alt || 0).toLocaleString()} FT • FL${Math.round((pData.alt || 0) / 100)} • ${Math.round(pData.speed || 0)}kt</div>
                     </div>
                 </div>
             `;
@@ -1257,7 +1110,7 @@
                     <div>현재 고도: <span class="text-cyan-300">${Math.round(target.alt || 0).toLocaleString()} FT</span></div>
                     <div>목표 고도: <span class="text-amber-300">${Math.round(target.targetAlt || target.alt || 0).toLocaleString()} FT</span></div>
                     <div>기수: <span class="text-cyan-300">${Math.round(target.heading)}°</span></div>
-                    <div>속도: <span class="text-cyan-300">${getDisplayedSpeedKt(target.speed)} KT</span></div>
+                    <div>속도: <span class="text-cyan-300">${Math.round(target.speed)} KT</span></div>
                 </div>
             `;
 
@@ -1286,9 +1139,13 @@
             if (target && !isNaN(val)) {
                 target.targetHeading = (val % 360 + 360) % 360;
                 target.isHolding = false;
-                pushMyStateToFirestore();
-                document.getElementById('cmdHdgVal').innerText = `${Math.round(target.targetHeading)}°`;
-                logRadio(target.id, `관제 지시: 기수 ${Math.round(target.targetHeading)}도로 선회 유지.`);
+                callGameApi('commandPlayer', { serverId, targetUid: trackedUserId, patch: { targetHeading: target.targetHeading, isHolding: false } }).then(() => {
+                    document.getElementById('cmdHdgVal').innerText = `${Math.round(target.targetHeading)}°`;
+                    logRadio(target.id, `관제 지시: 기수 ${Math.round(target.targetHeading)}도로 선회 유지.`);
+                }).catch(err => {
+                    console.error('ATC heading update failed:', err);
+                    alert('관제 기수 명령이 서버에서 거부되었습니다.');
+                });
             }
         };
 
@@ -1302,13 +1159,10 @@
                 remotePlayers.set(trackedUserId, target);
 
                 // 관제사가 지정한 항공기의 고도를 서버에도 즉시 반영
-                if (db && auth && auth.currentUser) {
-                    try {
-                        const targetRef = doc(db, 'servers', serverId, 'players', trackedUserId);
-                        await setDoc(targetRef, { ...target, alt: val, targetAlt: val, lastUpdated: Date.now() });
-                    } catch (e) {
-                        console.error('ATC altitude update failed:', e);
-                    }
+                try {
+                    await callGameApi('commandPlayer', { serverId, targetUid: trackedUserId, patch: { alt: val, targetAlt: val } });
+                } catch (e) {
+                    console.error('ATC altitude update failed:', e);
                 }
 
                 document.getElementById('cmdAltVal').innerText = `${Math.round(val)} FT`;
@@ -1329,8 +1183,12 @@
             const target = remotePlayers.get(trackedUserId);
             if (target) {
                 target.isHolding = !target.isHolding;
-                pushMyStateToFirestore();
-                logRadio(target.id, target.isHolding ? `관제 지시: 현 위치 대기 선회(Hold) 실시.` : `관제 지시: 대기 해제.`);
+                callGameApi('commandPlayer', { serverId, targetUid: trackedUserId, patch: { isHolding: target.isHolding } }).then(() => {
+                    logRadio(target.id, target.isHolding ? `관제 지시: 현 위치 대기 선회(Hold) 실시.` : `관제 지시: 대기 해제.`);
+                }).catch(err => {
+                    console.error('ATC hold update failed:', err);
+                    alert('관제 Hold 명령이 서버에서 거부되었습니다.');
+                });
             }
         };
 
@@ -1345,8 +1203,12 @@
             if (target) {
                 target.isEmergency = !target.isEmergency;
                 target.squawk = target.isEmergency ? "7700" : "7000";
-                pushMyStateToFirestore();
-                logRadio(target.id, target.isEmergency ? `[비상 승인] 비상착륙 공역 진입 승인 완료.` : `비상 상태 해제.`);
+                callGameApi('commandPlayer', { serverId, targetUid: trackedUserId, patch: { isEmergency: target.isEmergency, squawk: target.squawk } }).then(() => {
+                    logRadio(target.id, target.isEmergency ? `[비상 승인] 비상착륙 공역 진입 승인 완료.` : `비상 상태 해제.`);
+                }).catch(err => {
+                    console.error('ATC emergency update failed:', err);
+                    alert('관제 비상 명령이 서버에서 거부되었습니다.');
+                });
             }
         };
 
@@ -1412,24 +1274,6 @@
             });
         }
 
-        function isConversationRadioMessage(sender, text) {
-            const value = String(text || '');
-            const blockedPhrases = [
-                '레이더 추적 개시',
-                '통신 ID가',
-                '의 통신 ID가',
-                '착륙 완료.',
-                '비행 재개.',
-                '고도 변경:',
-                '고도 설정.',
-                '전투기 표적 지정',
-                '[전투]',
-                '공격 실패:'
-            ];
-            if (sender === 'SYSTEM' || sender === 'ATC CENTER') return false;
-            return !blockedPhrases.some(prefix => value.includes(prefix));
-        }
-
         function appendRadioMessage(sender, text, timestamp) {
             const logBox = document.getElementById('atcRadioLog');
             const now = new Date(timestamp || Date.now());
@@ -1443,17 +1287,26 @@
         async function logRadio(sender, text) {
             // ATC 기록에는 실제 조종사↔관제사 통신만 표시합니다.
             // 시스템 알림, UI 상태 변경, 전투/표적 상태 등은 기록하지 않습니다.
-            if (!isConversationRadioMessage(sender, text)) return;
+            const blocked = sender === 'SYSTEM' || sender === 'ATC CENTER' || [
+                '전투기 표적 지정',
+                '[전투]',
+                '공격 실패:',
+                '통신 ID가',
+                '의 통신 ID가',
+                '착륙 완료.',
+                '비행 재개.',
+                '고도 변경:',
+                '고도 설정.'
+            ].some(prefix => String(text).includes(prefix));
 
-            if (!db || !auth || !auth.currentUser) {
+            if (blocked) return;
+
+            if (!gameApi || !auth?.currentUser) {
                 appendRadioMessage(sender, text, Date.now());
                 return;
             }
             try {
-                const radioRef = doc(collection(db, 'servers', serverId, 'radio'));
-                await setDoc(radioRef, {
-                    sender, text, channel: atcChannel, timestamp: Date.now()
-                });
+                await callGameApi('sendRadio', { serverId, sender, text, channel: atcChannel });
             } catch (e) {
                 appendRadioMessage(sender, text, Date.now());
             }
@@ -1511,8 +1364,8 @@
                 document.getElementById('btnLanding').innerHTML = '<i class="fa-solid fa-plane-departure mr-1"></i> 이륙 / 재개';
                 logRadio(myCallsign, '착륙 완료. 비행을 중지합니다.');
             } else {
-                myAircraft.speed = getCruiseSpeedForAircraft();
-                myAircraft.targetSpeed = getCruiseSpeedForAircraft();
+                myAircraft.speed = GAME_CRUISE_SPEED_KT;
+                myAircraft.targetSpeed = GAME_CRUISE_SPEED_KT;
                 document.getElementById('btnLanding').innerHTML = '<i class="fa-solid fa-plane-arrival mr-1"></i> 착륙 / 정지';
                 logRadio(myCallsign, '비행 재개.');
             }
@@ -1529,16 +1382,7 @@
                 return;
             }
             try {
-                const targetRef = doc(db, 'servers', serverId, 'players', combatTargetUserId);
-                await setDoc(targetRef, {
-                    ...target,
-                    isDisabled: true,
-                    speed: 0,
-                    targetSpeed: 0,
-                    lastHitBy: myCallsign,
-                    lastHitAt: Date.now(),
-                    lastUpdated: Date.now()
-                });
+                await callGameApi('attack', { serverId, targetUid: combatTargetUserId });
                 logRadio(myCallsign, `[전투] ${target.id} 공격 성공. 대상 항공기 비행 중지.`);
             } catch (e) {
                 console.error('Attack failed:', e);
@@ -1547,185 +1391,12 @@
         };
 
         async function loadAccessPasswords() {
-            let localPasswords = null;
-            const local = localStorage.getItem('radarAccessPasswords');
-            if (local) {
-                try {
-                    const saved = JSON.parse(local);
-                    if (saved && saved.passwords) {
-                        localPasswords = { ...DEFAULT_ACCESS_PASSWORDS, ...saved.passwords };
-                    } else {
-                        localPasswords = { ...DEFAULT_ACCESS_PASSWORDS, ...saved };
-                    }
-                } catch (_) {}
-            }
-
-            if (!db) {
-                accessPasswords = localPasswords || { ...DEFAULT_ACCESS_PASSWORDS };
-                return;
-            }
-
-            const ref = getPasswordDocRef();
-            const snap = await getDoc(ref);
-
-            if (snap.exists()) {
-                const data = snap.data() || {};
-                const remotePasswords = data.passwords
-                    ? { ...DEFAULT_ACCESS_PASSWORDS, ...data.passwords }
-                    : { ...DEFAULT_ACCESS_PASSWORDS, ...data };
-                accessPasswords = remotePasswords;
-                localStorage.setItem('radarAccessPasswords', JSON.stringify({
-                    passwords: accessPasswords,
-                    updatedAt: Number(data.updatedAt) || Date.now()
-                }));
-                return;
-            }
-
-            accessPasswords = localPasswords || { ...DEFAULT_ACCESS_PASSWORDS };
-            const updatedAt = Date.now();
-            localStorage.setItem('radarAccessPasswords', JSON.stringify({
-                passwords: accessPasswords,
-                updatedAt
-            }));
-            await setDoc(ref, { passwords: accessPasswords, updatedAt }, { merge: false });
-        }
-
-        async function saveAccessPasswordsToFirebase() {
-            if (!db || !auth || !auth.currentUser || !firebaseReady) {
-                if (firebaseInitError) throw firebaseInitError;
-                throw new Error('Firebase 인증이 아직 완료되지 않았습니다.');
-            }
-
-            const ref = getPasswordDocRef();
-            const updatedAt = Date.now();
-            const payload = {
-                passwords: { ...DEFAULT_ACCESS_PASSWORDS, ...accessPasswords },
-                updatedAt
-            };
-
-            await setDoc(ref, payload, { merge: false });
-            const verifySnap = await getDoc(ref);
-
-            if (!verifySnap.exists()) {
-                throw new Error('Firestore 저장 후 문서를 다시 읽지 못했습니다.');
-            }
-
-            const saved = verifySnap.data() || {};
-            const savedPasswords = saved.passwords || {};
-            const checked = ['AIR_FORCE_TRAINING', 'ATC_TRAINING', 'FLIGHT_TRAINING', 'FIGHTER', 'ATC'];
-            const failed = checked.find(key => savedPasswords[key] !== accessPasswords[key]);
-            if (failed) {
-                throw new Error(`Firestore 검증 실패: ${failed} 값이 저장되지 않았습니다.`);
-            }
-
-            localStorage.setItem('radarAccessPasswords', JSON.stringify({
-                passwords: accessPasswords,
-                updatedAt
-            }));
-            localStorage.setItem('radarAccessPasswordsUpdatedAt', String(updatedAt));
-        }
-
-        async function sha256Hex(text) {
-            if (!window.crypto?.subtle) {
-                throw new Error('이 브라우저에서는 보안 해시 기능을 사용할 수 없습니다. HTTPS 또는 localhost에서 실행해 주세요.');
-            }
-            const data = new TextEncoder().encode(String(text));
-            const digest = await window.crypto.subtle.digest('SHA-256', data);
-            return Array.from(new Uint8Array(digest))
-                .map(b => b.toString(16).padStart(2, '0'))
-                .join('');
-        }
-
-        async function verifyMasterKeyViaFirestoreRules(masterInput) {
-            if (masterVerifiedThisSession) return true;
-            if (!db || !auth || !auth.currentUser) {
-                throw new Error('Firebase 인증이 완료되지 않았습니다.');
-            }
-
-            const normalized = String(masterInput ?? '').trim().toLowerCase();
-            if (!normalized) return false;
-
-            // 마스터키 원문은 Firestore로 보내지 않습니다.
-            // SHA-256 결과만 전송하고, Firestore Rules가 비공개 security 문서의
-            // masterHash와 일치하는 경우에만 쓰기를 허용합니다.
-            const hash = await sha256Hex(normalized);
-            const checkRef = doc(db, MASTER_VERIFY_COLLECTION, myUserId);
-
-            try {
-                await setDoc(checkRef, { hash });
-                masterVerifiedThisSession = true;
-                return true;
-            } catch (error) {
-                console.warn('Master key verification rejected:', error);
-                return false;
-            }
+            // 암호 검증은 게임 서버에서만 수행합니다.
+            return true;
         }
 
         window.changeAccessPasswords = async function() {
-            // 암호 변경 버튼은 게임 접속 전에도 사용할 수 있으므로
-            // Firebase 인증/초기화를 먼저 완료합니다.
-            if (!firebaseReady) {
-                try {
-                    await initFirebaseCore();
-                } catch (e) {
-                    console.error('Firebase password editor init failed:', e);
-                    const code = e?.code ? `\n오류 코드: ${e.code}` : '';
-                    const origin = `\n\n현재 주소: ${location.href}\n프로토콜: ${location.protocol}`;
-                    const hint = location.protocol === 'file:'
-                        ? '\n\n지금 HTML 파일을 직접 열고 있습니다(file://). localhost 또는 Firebase Hosting처럼 http/https 주소에서 실행해 주세요.'
-                        : '';
-                    alert(`Firebase 인증/연결에 실패했습니다.${code}\n\n${e?.message || e}${origin}${hint}`);
-                    return;
-                }
-            }
-
-            const master = prompt('암호 변경을 위한 마스터 코드를 입력하세요.');
-            if (master === null) return;
-
-            let masterOk = false;
-            try {
-                masterOk = await verifyMasterKeyViaFirestoreRules(master);
-            } catch (e) {
-                console.error('Master key verification error:', e);
-            }
-            if (!masterOk) {
-                alert('마스터 코드가 올바르지 않거나 Firebase 보안 규칙이 아직 설정되지 않았습니다.');
-                return;
-            }
-
-            const next = { ...accessPasswords };
-            const serverLabels = [
-                ['AIR_FORCE_TRAINING', '공군 훈련 서버'],
-                ['ATC_TRAINING', '관제 훈련 서버'],
-                ['FLIGHT_TRAINING', '비행 훈련 서버'],
-                ['FIGHTER', '전투기 선택'],
-                ['ATC', '관제사 선택']
-            ];
-            for (const [key, label] of serverLabels) {
-                const value = prompt(`${label} 새 암호를 입력하세요.\n(현재 암호를 유지하려면 빈칸)`, next[key]);
-                if (value === null) return;
-                if (value.trim()) next[key] = value.trim();
-            }
-
-            accessPasswords = { ...DEFAULT_ACCESS_PASSWORDS, ...next };
-
-            try {
-                // Firebase에 먼저 저장하고 실제로 다시 읽어 검증합니다.
-                await saveAccessPasswordsToFirebase();
-                verifiedServerId = null;
-                verifiedServerPassword = false;
-                verifiedAtcPassword = false;
-                verifiedFighterPassword = false;
-                alert('암호가 변경되었고 Firebase 저장까지 확인되었습니다.\n\n다른 브라우저/기기에서도 같은 암호를 사용할 수 있습니다.');
-            } catch (e) {
-                console.error('Password save failed:', e);
-                const code = e?.code ? `\n오류 코드: ${e.code}` : '';
-                localStorage.setItem('radarAccessPasswords', JSON.stringify({
-                    passwords: accessPasswords,
-                    updatedAt: Date.now()
-                }));
-                alert(`Firebase 저장에 실패했습니다.${code}\n\n오류 내용: ${e?.message || e}\n\n이번 암호는 이 브라우저에만 임시 저장했습니다. Firebase Rules와 익명 인증을 확인해야 합니다.`);
-            }
+            alert('보안 강화 버전에서는 브라우저에 마스터키나 비밀번호를 저장하지 않습니다.\n\nFirebase의 access_control/security 문서에서 masterHash / atcHash / fighterHash / 서버 해시를 직접 변경하세요.\n\n값은 SHA-256 해시(string)로 저장해야 합니다.');
         };
 
         window.adjustPilotAltitude = function(delta) {
@@ -1763,7 +1434,7 @@
         function getDistanceNm(lat1, lon1, lat2, lon2) {
             const R = 3440.065;
             const dLat = (lat2 - lat1) * Math.PI / 180;
-            const dLon = ((((lon2 - lon1 + 180) % 360) + 360) % 360 - 180) * Math.PI / 180;
+            const dLon = (lon2 - lon1) * Math.PI / 180;
             const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
                       Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
                       Math.sin(dLon / 2) * Math.sin(dLon / 2);
@@ -1776,11 +1447,10 @@
             const phi2 = lat2 * Math.PI / 180;
             const lambda1 = lon1 * Math.PI / 180;
             const lambda2 = lon2 * Math.PI / 180;
-            const deltaLambda = ((lambda2 - lambda1 + Math.PI) % (2 * Math.PI)) - Math.PI;
 
-            const y = Math.sin(deltaLambda) * Math.cos(phi2);
+            const y = Math.sin(lambda2 - lambda1) * Math.cos(phi2);
             const x = Math.cos(phi1) * Math.sin(phi2) -
-                      Math.sin(phi1) * Math.cos(phi2) * Math.cos(deltaLambda);
+                      Math.sin(phi1) * Math.cos(phi2) * Math.cos(lambda2 - lambda1);
             return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
         }
     </script>
