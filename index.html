@@ -151,13 +151,10 @@
                         <option value="GLOBAL">GLOBAL</option>
                         <option value="GLOBAL-2">GLOBAL-2</option>
                         <option value="GLOBAL-3">GLOBAL-3</option>
-                        <option value="AIR_FORCE_TRAINING">공군 훈련 🔒</option>
-                        <option value="ATC_TRAINING">관제 훈련 🔒</option>
-                        <option value="FLIGHT_TRAINING">비행 훈련 🔒</option>
+                        <option value="AIR_FORCE_TRAINING">공군 훈련</option>
+                        <option value="ATC_TRAINING">관제 훈련</option>
+                        <option value="FLIGHT_TRAINING">비행 훈련</option>
                     </select>
-                    <button type="button" onclick="changeAccessPasswords()" class="mt-1.5 w-full py-1.5 bg-red-600/10 hover:bg-red-600/20 text-red-300 border border-red-500/30 rounded-lg text-[10px] font-bold">
-                        <i class="fa-solid fa-key mr-1"></i> 암호 변경 (마스터)
-                    </button>
                 </div>
 
                 <div>
@@ -208,9 +205,6 @@
                 <div class="mt-1 flex items-center gap-2">
                     <button onclick="changeAtcChannel()" class="px-2 py-1 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded text-[10px] font-bold transition">
                         <i class="fa-solid fa-radio mr-1"></i>통신 ID 변경
-                    </button>
-                    <button onclick="changeAccessPasswords()" class="px-2 py-1 bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-red-500/30 rounded text-[10px] font-bold transition">
-                        <i class="fa-solid fa-key mr-1"></i>암호 변경
                     </button>
                     <span class="text-[10px] text-gray-500">같은 서버 + 같은 통신 ID끼리만 통신</span>
                 </div>
@@ -468,7 +462,7 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFunctions, httpsCallable } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-functions.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // --- Firebase Config & Globals ---
         // 실제 Firebase 프로젝트: fly-if-you-can
@@ -483,7 +477,7 @@
             measurementId: 'G-L47JZ2DKB4'
         };
         
-        let app, auth, functions, gameApi;
+        let app, db, auth;
         let firebaseReady = false;
         let firebaseInitError = null;
         let firebaseInitPromise = null;
@@ -496,39 +490,7 @@
         let combatTargetUserId = null;
         let radioUnsubscribe = null;
 
-        // 보안 비밀번호는 브라우저/Firestore의 일반 문서에 평문으로 저장하지 않습니다.
-        // 입력값을 SHA-256으로 변환한 뒤, Firestore Security Rules가 보호된
-        // access_control/password 문서의 해시와 비교해 세션을 승인합니다.
-        let verifiedServerId = null;
-        let verifiedServerPassword = false;
-        let verifiedAtcPassword = false;
-        let verifiedFighterPassword = false;
-        let accessSession = null;
-        const SESSION_TTL_MS = 15 * 60 * 1000;
-
-        async function callGameApi(action, data = {}) {
-            if (!gameApi) throw new Error('게임 서버 API가 초기화되지 않았습니다.');
-            const result = await gameApi({ action, ...data });
-            return result.data;
-        }
-
-        async function sha256Hex(value) {
-            const data = new TextEncoder().encode(String(value));
-            const hash = await crypto.subtle.digest('SHA-256', data);
-            return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
-        }
-
-        async function authorizeSession({ server = null, role = null, aircraftType = null, password, purpose = null }) {
-            if (!auth?.currentUser) throw new Error('Firebase 인증이 필요합니다.');
-            const result = await callGameApi('authorize', { server, role, aircraftType, password, purpose });
-            const expiresAt = Number(result?.expiresAt) || (Date.now() + SESSION_TTL_MS);
-            accessSession = { server, role, aircraftType, expiresAt };
-            return true;
-        }
-
-        function sessionIsFresh() {
-            return accessSession && Number(accessSession.expiresAt) > Date.now();
-        }
+        // 비밀번호/암호 체계는 제거되었습니다.
         let playersUnsubscribe = null;
         const PRESENCE_TIMEOUT_MS = 12000;
 
@@ -569,22 +531,7 @@
         let trackedUserId = null;
         let waypointSeq = 1;
 
-        window.selectRole = async function(role) {
-            if (role === 'ATC' && !verifiedAtcPassword) {
-                try { await initFirebaseCore(); } catch (err) {
-                    alert(`Firebase 인증에 실패했습니다.\n\n${err?.message || err}`); return;
-                }
-                const entered = prompt('관제사 선택 암호를 입력하세요.');
-                if (entered === null) return;
-                try {
-                    await authorizeSession({ role: 'ATC', password: entered, purpose: 'ATC' });
-                    verifiedAtcPassword = true;
-                } catch (err) {
-                    alert(`관제사 인증 실패\n\n오류 코드: ${err?.code || 'unknown'}\n${err?.message || err}`);
-                    console.error('ATC authorization failed:', err);
-                    return;
-                }
-            }
+        window.selectRole = function(role) {
             myRole = role;
             const btnPilot = document.getElementById('roleBtnPilot');
             const btnATC = document.getElementById('roleBtnATC');
@@ -597,22 +544,7 @@
             }
         };
 
-        window.selectAircraftType = async function(type) {
-            if (type === 'FIGHTER' && !verifiedFighterPassword) {
-                try { await initFirebaseCore(); } catch (err) {
-                    alert(`Firebase 인증에 실패했습니다.\n\n${err?.message || err}`); return;
-                }
-                const entered = prompt('전투기 선택 암호를 입력하세요.');
-                if (entered === null) return;
-                try {
-                    await authorizeSession({ role: 'PILOT', aircraftType: 'FIGHTER', password: entered, purpose: 'FIGHTER' });
-                    verifiedFighterPassword = true;
-                } catch (err) {
-                    alert(`전투기 인증 실패\n\n오류 코드: ${err?.code || 'unknown'}\n${err?.message || err}`);
-                    console.error('Fighter authorization failed:', err);
-                    return;
-                }
-            }
+        window.selectAircraftType = function(type) {
             myAircraftType = type;
             const civil = document.getElementById('typeBtnCivil');
             const fighter = document.getElementById('typeBtnFighter');
@@ -624,11 +556,6 @@
                 fighter.className = 'py-2 bg-gray-900 text-gray-400 rounded-lg text-xs font-bold border border-gray-800';
             }
         };
-
-        document.getElementById('inputServer').addEventListener('change', function() {
-            verifiedServerId = null;
-            verifiedServerPassword = false;
-        });
 
         window.startMultiplayerSession = async function() {
             try {
@@ -642,33 +569,6 @@
             }
 
             const selectedServer = (document.getElementById('inputServer').value || 'GLOBAL').trim().toUpperCase();
-            if (['AIR_FORCE_TRAINING', 'ATC_TRAINING', 'FLIGHT_TRAINING'].includes(selectedServer)) {
-                if (verifiedServerId !== selectedServer || !verifiedServerPassword || !sessionIsFresh()) {
-                    const entered = prompt('이 훈련 서버는 암호가 필요합니다. 서버 암호를 입력하세요.');
-                    if (entered === null) return;
-                    try {
-                        await authorizeSession({ server: selectedServer, role: myRole, aircraftType: myAircraftType, password: entered, purpose: selectedServer });
-                        verifiedServerId = selectedServer;
-                        verifiedServerPassword = true;
-                    } catch (err) {
-                        alert(`서버 인증 실패\n\n오류 코드: ${err?.code || 'unknown'}\n${err?.message || err}`);
-                        console.error('Server authorization failed:', err);
-                        return;
-                    }
-                }
-            } else {
-                verifiedServerId = selectedServer;
-                verifiedServerPassword = true;
-            }
-
-            if (myRole === 'ATC' && !verifiedAtcPassword) {
-                alert('관제사 암호를 먼저 입력해 주세요.');
-                return;
-            }
-            if (myRole === 'PILOT' && myAircraftType === 'FIGHTER' && !verifiedFighterPassword) {
-                alert('전투기 암호를 먼저 입력해 주세요.');
-                return;
-            }
 
             const csInput = document.getElementById('inputCallsign').value.trim().toUpperCase();
             if (csInput) myCallsign = csInput;
@@ -765,7 +665,7 @@
                         targetPlayer.waypoints = [{ lat: clickLat, lng: clickLng, name: wptName }];
                         targetPlayer.isHolding = false;
                         try {
-                            await callGameApi('commandPlayer', { serverId, targetUid: trackedUserId, patch: { waypoints: targetPlayer.waypoints, isHolding: false } });
+                            await setDoc(doc(db, 'servers', serverId, 'players', trackedUserId), { atcRouteCommand: { issuedAt: Date.now(), waypoints: targetPlayer.waypoints, isHolding: false } }, { merge: true });
                             logRadio(targetPlayer.id, `관제 지시: [${wptName}] 포인트로 직항(Direct) 진행.`);
                         } catch (err) {
                             console.error('ATC direct command failed:', err);
@@ -782,9 +682,8 @@
 
             firebaseInitPromise = (async () => {
                 if (!app) app = initializeApp(firebaseConfig);
+                if (!db) db = getFirestore(app);
                 if (!auth) auth = getAuth(app);
-                if (!functions) functions = getFunctions(app, 'asia-northeast3');
-                if (!gameApi) gameApi = httpsCallable(functions, 'gameApi');
 
                 let credential;
                 if (auth.currentUser) {
@@ -795,12 +694,8 @@
                     credential = await signInAnonymously(auth);
                 }
 
-                if (!credential?.user) {
-                    throw new Error('Firebase 인증은 실행됐지만 사용자 정보를 받지 못했습니다.');
-                }
-
+                if (!credential?.user) throw new Error('Firebase 인증은 실행됐지만 사용자 정보를 받지 못했습니다.');
                 myUserId = credential.user.uid;
-                await loadAccessPasswords();
                 firebaseReady = true;
                 firebaseInitError = null;
             })();
@@ -813,67 +708,81 @@
         }
 
         async function subscribeToServerSync() {
-            if (!auth?.currentUser || !gameApi) {
-                throw new Error('Firebase 인증이 완료되지 않았습니다.');
-            }
+            if (!auth?.currentUser || !db) throw new Error('Firebase 인증이 완료되지 않았습니다.');
 
-            if (playersUnsubscribe) {
-                clearInterval(playersUnsubscribe);
-                playersUnsubscribe = null;
-            }
-            if (radioUnsubscribe) {
-                clearInterval(radioUnsubscribe);
-                radioUnsubscribe = null;
-            }
-
+            if (playersUnsubscribe) { playersUnsubscribe(); playersUnsubscribe = null; }
+            if (radioUnsubscribe) { radioUnsubscribe(); radioUnsubscribe = null; }
             remotePlayers.clear();
 
-            const refresh = async () => {
-                try {
-                    const state = await callGameApi('getServerState', { serverId, channel: atcChannel });
-                    const players = Array.isArray(state?.players) ? state.players : [];
-                    const messages = Array.isArray(state?.radio) ? state.radio : [];
-                    const now = Date.now();
-                    const latestByCallsign = new Map();
+            const playersCol = collection(db, 'servers', serverId, 'players');
+            playersUnsubscribe = onSnapshot(playersCol, (snapshot) => {
+                const now = Date.now();
+                const latestByCallsign = new Map();
 
-                    for (const item of players) {
-                        const uid = item.uid;
-                        const data = item.data || {};
-                        if (!uid || uid === myUserId) continue;
-                        const lastSeen = Number(data.lastUpdated) || 0;
-                        if (!lastSeen || now - lastSeen > PRESENCE_TIMEOUT_MS) continue;
-                        const callsign = String(data.id || uid).trim().toUpperCase();
-                        const existing = latestByCallsign.get(callsign);
-                        if (!existing || lastSeen > existing.data.lastUpdated) {
-                            latestByCallsign.set(callsign, { uid, data: { ...data, lng: normalizeLongitude(Number(data.lng) || 0), lastUpdated: lastSeen } });
+                snapshot.forEach(docSnap => {
+                    const data = docSnap.data() || {};
+                    const uid = docSnap.id;
+
+                    if (uid === myUserId) {
+                        const routeCmd = data.atcRouteCommand;
+                        const routeAt = Number(routeCmd?.issuedAt) || 0;
+                        if (myRole === 'PILOT' && routeAt > Number(myAircraft._lastAtcRouteCommandAt || 0) && Array.isArray(routeCmd?.waypoints)) {
+                            myAircraft.waypoints = routeCmd.waypoints.map(w => ({
+                                lat: Number(w.lat), lng: normalizeLongitude(Number(w.lng)), name: String(w.name || 'ATC_WPT')
+                            })).filter(w => Number.isFinite(w.lat) && Number.isFinite(w.lng));
+                            myAircraft.isHolding = Boolean(routeCmd.isHolding);
+                            myAircraft._lastAtcRouteCommandAt = routeAt;
+                            const nextWptEl = document.getElementById('userNextWpt');
+                            if (nextWptEl) nextWptEl.innerText = myAircraft.waypoints[0]?.name || 'DIRECT HEADING';
+                            drawMyWaypoints();
                         }
+
+                        const cmd = data.atcCommand;
+                        const cmdAt = Number(cmd?.issuedAt) || 0;
+                        if (myRole === 'PILOT' && cmdAt > Number(myAircraft._lastAtcCommandAt || 0) && cmd?.patch && typeof cmd.patch === 'object') {
+                            Object.assign(myAircraft, cmd.patch);
+                            myAircraft._lastAtcCommandAt = cmdAt;
+                            if (Number.isFinite(Number(myAircraft.targetAlt))) myAircraft.alt = Number(myAircraft.targetAlt);
+                        }
+                        return;
                     }
 
-                    const activeIds = new Set();
-                    remotePlayers.clear();
-                    latestByCallsign.forEach(({ uid, data }) => {
-                        activeIds.add(uid);
-                        remotePlayers.set(uid, data);
-                    });
-
-                    for (const [uid] of playerMarkers.entries()) {
-                        if (uid !== myUserId && !activeIds.has(uid)) removePlayerMarker(uid);
+                    const lastSeen = Number(data.lastUpdated) || 0;
+                    if (!lastSeen || now - lastSeen > PRESENCE_TIMEOUT_MS) return;
+                    const callsign = String(data.id || uid).trim().toUpperCase();
+                    const existing = latestByCallsign.get(callsign);
+                    if (!existing || lastSeen > existing.data.lastUpdated) {
+                        latestByCallsign.set(callsign, { uid, data: { ...data, lng: normalizeLongitude(Number(data.lng) || 0), lastUpdated: lastSeen } });
                     }
-                    updatePlayersUIList();
+                });
 
-                    const logBox = document.getElementById('atcRadioLog');
-                    logBox.innerHTML = '';
-                    messages.slice(-80).forEach(m => appendRadioMessage(m.sender, m.text, m.timestamp));
-                    logBox.scrollTop = logBox.scrollHeight;
-                    document.getElementById('connStatusDot').className = 'w-3 h-3 rounded-full bg-emerald-400 pulse-green';
-                } catch (error) {
-                    console.error('Game server sync error:', error);
-                    document.getElementById('connStatusDot').className = 'w-3 h-3 rounded-full bg-red-500';
+                const activeIds = new Set();
+                remotePlayers.clear();
+                latestByCallsign.forEach(({ uid, data }) => { activeIds.add(uid); remotePlayers.set(uid, data); });
+                for (const [uid] of playerMarkers.entries()) {
+                    if (uid !== myUserId && !activeIds.has(uid)) removePlayerMarker(uid);
                 }
-            };
+                updatePlayersUIList();
+            }, (error) => {
+                console.error('Firestore player sync error:', error);
+                document.getElementById('connStatusDot').className = 'w-3 h-3 rounded-full bg-red-500';
+            });
 
-            await refresh();
-            playersUnsubscribe = setInterval(refresh, 1000);
+            const radioCol = collection(db, 'servers', serverId, 'radio');
+            radioUnsubscribe = onSnapshot(radioCol, (snapshot) => {
+                const messages = [];
+                snapshot.forEach(d => {
+                    const m = d.data() || {};
+                    if ((m.channel || '') === atcChannel && isConversationRadioMessage(m.sender, m.text)) messages.push(m);
+                });
+                messages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+                const logBox = document.getElementById('atcRadioLog');
+                logBox.innerHTML = '';
+                messages.slice(-80).forEach(m => appendRadioMessage(m.sender, m.text, m.timestamp));
+                logBox.scrollTop = logBox.scrollHeight;
+            }, (error) => console.error('Radio sync error:', error));
+
+            document.getElementById('connStatusDot').className = 'w-3 h-3 rounded-full bg-emerald-400 pulse-green';
         }
 
         async function initFirebaseAndSync() {
@@ -887,15 +796,16 @@
         });
 
         async function pushMyStateToFirestore() {
-            if (!auth?.currentUser || !gameApi || !serverId) return;
+            if (!auth?.currentUser || !db || !serverId) return;
             try {
                 myAircraft.role = myRole;
                 myAircraft.online = true;
                 myAircraft.lastUpdated = Date.now();
-                await callGameApi('upsertPlayer', { serverId, player: myAircraft });
-            } catch (e) {
-                console.error('Game state sync failed:', e);
-            }
+                const safeAircraft = { ...myAircraft };
+                delete safeAircraft._lastAtcCommandAt;
+                delete safeAircraft._lastAtcRouteCommandAt;
+                await setDoc(doc(db, 'servers', serverId, 'players', myUserId), safeAircraft, { merge: true });
+            } catch (e) { console.error('Game state sync failed:', e); }
         }
 
         function startPhysicsAndSyncLoop() {
@@ -1214,7 +1124,7 @@
             if (target && !isNaN(val)) {
                 target.targetHeading = (val % 360 + 360) % 360;
                 target.isHolding = false;
-                callGameApi('commandPlayer', { serverId, targetUid: trackedUserId, patch: { targetHeading: target.targetHeading, isHolding: false } }).then(() => {
+                setDoc(doc(db, 'servers', serverId, 'players', trackedUserId), { atcCommand: { issuedAt: Date.now(), patch: { targetHeading: target.targetHeading, isHolding: false } } }, { merge: true }).then(() => {
                     document.getElementById('cmdHdgVal').innerText = `${Math.round(target.targetHeading)}°`;
                     logRadio(target.id, `관제 지시: 기수 ${Math.round(target.targetHeading)}도로 선회 유지.`);
                 }).catch(err => {
@@ -1235,7 +1145,7 @@
 
                 // 관제사가 지정한 항공기의 고도를 서버에도 즉시 반영
                 try {
-                    await callGameApi('commandPlayer', { serverId, targetUid: trackedUserId, patch: { alt: val, targetAlt: val } });
+                    await setDoc(doc(db, 'servers', serverId, 'players', trackedUserId), { atcCommand: { issuedAt: Date.now(), patch: { alt: val, targetAlt: val } } }, { merge: true });
                 } catch (e) {
                     console.error('ATC altitude update failed:', e);
                 }
@@ -1258,7 +1168,7 @@
             const target = remotePlayers.get(trackedUserId);
             if (target) {
                 target.isHolding = !target.isHolding;
-                callGameApi('commandPlayer', { serverId, targetUid: trackedUserId, patch: { isHolding: target.isHolding } }).then(() => {
+                setDoc(doc(db, 'servers', serverId, 'players', trackedUserId), { atcCommand: { issuedAt: Date.now(), patch: { isHolding: target.isHolding } } }, { merge: true }).then(() => {
                     logRadio(target.id, target.isHolding ? `관제 지시: 현 위치 대기 선회(Hold) 실시.` : `관제 지시: 대기 해제.`);
                 }).catch(err => {
                     console.error('ATC hold update failed:', err);
@@ -1278,7 +1188,7 @@
             if (target) {
                 target.isEmergency = !target.isEmergency;
                 target.squawk = target.isEmergency ? "7700" : "7000";
-                callGameApi('commandPlayer', { serverId, targetUid: trackedUserId, patch: { isEmergency: target.isEmergency, squawk: target.squawk } }).then(() => {
+                setDoc(doc(db, 'servers', serverId, 'players', trackedUserId), { atcCommand: { issuedAt: Date.now(), patch: { isEmergency: target.isEmergency, squawk: target.squawk } } }, { merge: true }).then(() => {
                     logRadio(target.id, target.isEmergency ? `[비상 승인] 비상착륙 공역 진입 승인 완료.` : `비상 상태 해제.`);
                 }).catch(err => {
                     console.error('ATC emergency update failed:', err);
@@ -1376,12 +1286,12 @@
 
             if (blocked) return;
 
-            if (!gameApi || !auth?.currentUser) {
+            if (!db || !auth?.currentUser) {
                 appendRadioMessage(sender, text, Date.now());
                 return;
             }
             try {
-                await callGameApi('sendRadio', { serverId, sender, text, channel: atcChannel });
+                await setDoc(doc(collection(db, 'servers', serverId, 'radio')), { sender, text, channel: atcChannel, timestamp: Date.now() });
             } catch (e) {
                 appendRadioMessage(sender, text, Date.now());
             }
@@ -1457,21 +1367,12 @@
                 return;
             }
             try {
-                await callGameApi('attack', { serverId, targetUid: combatTargetUserId });
+                await setDoc(doc(db, 'servers', serverId, 'players', combatTargetUserId), { atcCommand: { issuedAt: Date.now(), patch: { isDisabled: true, speed: 0, targetSpeed: 0, lastHitBy: myCallsign, lastHitAt: Date.now() } } }, { merge: true });
                 logRadio(myCallsign, `[전투] ${target.id} 공격 성공. 대상 항공기 비행 중지.`);
             } catch (e) {
                 console.error('Attack failed:', e);
                 logRadio(myCallsign, '공격 실패: 서버 권한 또는 연결 상태를 확인하십시오.');
             }
-        };
-
-        async function loadAccessPasswords() {
-            // 암호 검증은 게임 서버에서만 수행합니다.
-            return true;
-        }
-
-        window.changeAccessPasswords = async function() {
-            alert('보안 강화 버전에서는 브라우저에 마스터키나 비밀번호를 저장하지 않습니다.\n\nFirebase의 access_control/password 문서에서 masterHash / atcHash / fighterHash / 서버 해시를 직접 변경하세요.\n\n값은 SHA-256 해시(string)로 저장해야 합니다.');
         };
 
         window.adjustPilotAltitude = function(delta) {
