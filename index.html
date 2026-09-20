@@ -498,7 +498,7 @@
 
         // 보안 비밀번호는 브라우저/Firestore의 일반 문서에 평문으로 저장하지 않습니다.
         // 입력값을 SHA-256으로 변환한 뒤, Firestore Security Rules가 보호된
-        // access_control/security 문서의 해시와 비교해 세션을 승인합니다.
+        // access_control/password 문서의 해시와 비교해 세션을 승인합니다.
         let verifiedServerId = null;
         let verifiedServerPassword = false;
         let verifiedAtcPassword = false;
@@ -518,9 +518,9 @@
             return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
         }
 
-        async function authorizeSession({ server = null, role = null, aircraftType = null, password }) {
+        async function authorizeSession({ server = null, role = null, aircraftType = null, password, purpose = null }) {
             if (!auth?.currentUser) throw new Error('Firebase 인증이 필요합니다.');
-            const result = await callGameApi('authorize', { server, role, aircraftType, password });
+            const result = await callGameApi('authorize', { server, role, aircraftType, password, purpose });
             const expiresAt = Number(result?.expiresAt) || (Date.now() + SESSION_TTL_MS);
             accessSession = { server, role, aircraftType, expiresAt };
             return true;
@@ -577,10 +577,10 @@
                 const entered = prompt('관제사 선택 암호를 입력하세요.');
                 if (entered === null) return;
                 try {
-                    await authorizeSession({ role: 'ATC', password: entered });
+                    await authorizeSession({ role: 'ATC', password: entered, purpose: 'ATC' });
                     verifiedAtcPassword = true;
                 } catch (err) {
-                    alert('관제사 암호가 올바르지 않거나 권한 확인에 실패했습니다.');
+                    alert(`관제사 인증 실패\n\n오류 코드: ${err?.code || 'unknown'}\n${err?.message || err}`);
                     console.error('ATC authorization failed:', err);
                     return;
                 }
@@ -605,10 +605,10 @@
                 const entered = prompt('전투기 선택 암호를 입력하세요.');
                 if (entered === null) return;
                 try {
-                    await authorizeSession({ role: 'PILOT', aircraftType: 'FIGHTER', password: entered });
+                    await authorizeSession({ role: 'PILOT', aircraftType: 'FIGHTER', password: entered, purpose: 'FIGHTER' });
                     verifiedFighterPassword = true;
                 } catch (err) {
-                    alert('전투기 암호가 올바르지 않거나 권한 확인에 실패했습니다.');
+                    alert(`전투기 인증 실패\n\n오류 코드: ${err?.code || 'unknown'}\n${err?.message || err}`);
                     console.error('Fighter authorization failed:', err);
                     return;
                 }
@@ -647,11 +647,11 @@
                     const entered = prompt('이 훈련 서버는 암호가 필요합니다. 서버 암호를 입력하세요.');
                     if (entered === null) return;
                     try {
-                        await authorizeSession({ server: selectedServer, role: myRole, aircraftType: myAircraftType, password: entered });
+                        await authorizeSession({ server: selectedServer, role: myRole, aircraftType: myAircraftType, password: entered, purpose: selectedServer });
                         verifiedServerId = selectedServer;
                         verifiedServerPassword = true;
                     } catch (err) {
-                        alert('서버 암호가 올바르지 않거나 권한 확인에 실패했습니다.');
+                        alert(`서버 인증 실패\n\n오류 코드: ${err?.code || 'unknown'}\n${err?.message || err}`);
                         console.error('Server authorization failed:', err);
                         return;
                     }
@@ -1471,7 +1471,7 @@
         }
 
         window.changeAccessPasswords = async function() {
-            alert('보안 강화 버전에서는 브라우저에 마스터키나 비밀번호를 저장하지 않습니다.\n\nFirebase의 access_control/security 문서에서 masterHash / atcHash / fighterHash / 서버 해시를 직접 변경하세요.\n\n값은 SHA-256 해시(string)로 저장해야 합니다.');
+            alert('보안 강화 버전에서는 브라우저에 마스터키나 비밀번호를 저장하지 않습니다.\n\nFirebase의 access_control/password 문서에서 masterHash / atcHash / fighterHash / 서버 해시를 직접 변경하세요.\n\n값은 SHA-256 해시(string)로 저장해야 합니다.');
         };
 
         window.adjustPilotAltitude = function(delta) {
