@@ -753,7 +753,7 @@
                 // PILOT MODE: Add Waypoint to My Aircraft
                 if (myRole === 'PILOT') {
                     const wptName = `WPT${waypointSeq++}`;
-                    myAircraft.waypoints.push({ lat: clickLat, lng: clickLng, name: wptName });
+                    myAircraft.waypoints.push({ lat: clickLat, lng: normalizeLongitude(clickLng), name: wptName });
                     document.getElementById('userNextWpt').innerText = myAircraft.waypoints[0].name;
                     drawMyWaypoints();
                 }
@@ -931,50 +931,125 @@
                 return;
             }
 
-            // Holding
-            if (myAircraft.isHolding) {
-                myAircraft.targetHeading = (myAircraft.targetHeading + 3 * dt) % 360;
-            } 
-            // Waypoints navigation
-            else if (myAircraft.waypoints.length > 0) {
-                const targetWpt = myAircraft.waypoints[0];
-                const distNm = getDistanceNm(myAircraft.lat, myAircraft.lng, targetWpt.lat, targetWpt.lng);
+            // 속도에 비해 웨이포인트가 가까워도 그냥 지나치지 않도록
+            // 이번 프레임의 이동량을 계산한 뒤, 남은 이동량을 다음 웨이포인트에 이어서 사용합니다.
+            let remainingNm = Math.max(0, (Number(myAircraft.speed) || 0) / 3600 * Math.max(dt, 0));
+            let routeChanged = false;
 
-                if (distNm < 1.2) {
-                    myAircraft.waypoints.shift();
-                    drawMyWaypoints();
-                    if (myAircraft.waypoints.length === 0) {
-                        document.getElementById('userNextWpt').innerText = "DIRECT HEADING";
+            // HOLD는 웨이포인트보다 우선합니다.
+            if (myAircraft.isHolding) {
+                myAircraft.targetHeading = (Number(myAircraft.targetHeading) + 3 * dt) % 360;
+                myAircraft.heading = normalizeHeading(myAircraft.targetHeading);
+                if (remainingNm > 0) {
+                    moveGreatCircle(myAircraft, remainingNm, myAircraft.heading);
+                }
+            } else {
+                // WPT1 -> WPT2 -> WPT3 순서대로 정확히 통과합니다.
+                while (myAircraft.waypoints.length > 0 && remainingNm > 0) {
+                    const targetWpt = myAircraft.waypoints[0];
+                    if (!isValidWaypoint(targetWpt)) {
+                        myAircraft.waypoints.shift();
+                        routeChanged = true;
+                        continue;
                     }
-                } else {
-                    myAircraft.targetHeading = getBearing(myAircraft.lat, myAircraft.lng, targetWpt.lat, targetWpt.lng);
+
+                    const targetLat = Number(targetWpt.lat);
+                    const targetLng = normalizeLongitude(Number(targetWpt.lng));
+                    const distNm = getDistanceNm(myAircraft.lat, myAircraft.lng, targetLat, targetLng);
+
+                    // 거의 도착한 경우 실제 좌표를 웨이포인트에 맞춘 뒤 다음 점으로 넘깁니다.
+                    if (distNm <= 0.05) {
+                        myAircraft.lat = targetLat;
+                        myAircraft.lng = targetLng;
+                        myAircraft.waypoints.shift();
+                        routeChanged = true;
+                        continue;
+                    }
+
+                    const bearing = getBearing(myAircraft.lat, myAircraft.lng, targetLat, targetLng);
+                    // 항로 비행에서는 매 프레임 목표 웨이포인트를 향하도록 기수를 맞춥니다.
+                    // 기존의 느린 선회 때문에 고속 비행 시 WPT를 크게 빗나가던 문제를 제거합니다.
+                    myAircraft.targetHeading = bearing;
+                    myAircraft.heading = bearing;
+
+                    if (remainingNm >= distNm) {
+                        // 이번 프레임 이동량이 WPT까지의 거리보다 크면 정확히 도착시키고
+                        // 남은 이동량으로 다음 WPT까지 계속 진행합니다.
+                        myAircraft.lat = targetLat;
+                        myAircraft.lng = targetLng;
+                        remainingNm -= distNm;
+                        myAircraft.waypoints.shift();
+                        routeChanged = true;
+                    } else {
+                        moveGreatCircle(myAircraft, remainingNm, bearing);
+                        remainingNm = 0;
+                    }
+                }
+
+                // 항로가 끝나면 마지막 기수 방향으로 계속 직진합니다.
+                if (myAircraft.waypoints.length === 0 && remainingNm > 0) {
+                    myAircraft.heading = normalizeHeading(myAircraft.heading);
+                    myAircraft.targetHeading = myAircraft.heading;
+                    moveGreatCircle(myAircraft, remainingNm, myAircraft.heading);
+                    remainingNm = 0;
                 }
             }
 
-            // Smooth Heading Turn
-            let angleDiff = (myAircraft.targetHeading - myAircraft.heading + 540) % 360 - 180;
-            if (Math.abs(angleDiff) > 0.1) {
-                const turnStep = Math.sign(angleDiff) * Math.min(Math.abs(angleDiff), 3.5 * dt);
-                myAircraft.heading = (myAircraft.heading + turnStep + 360) % 360;
+            if (routeChanged) {
+                const nextWptEl = document.getElementById('userNextWpt');
+                if (nextWptEl) {
+                    nextWptEl.innerText = myAircraft.waypoints[0]?.name || 'DIRECT HEADING';
+                }
+                drawMyWaypoints();
             }
 
             // 고도는 목표값으로 즉시 변경
             myAircraft.alt = myAircraft.targetAlt;
 
-            // Position calculation
-            const speedNmPerSec = myAircraft.speed / 3600;
-            const distanceMovedNm = speedNmPerSec * dt;
-            const rad = myAircraft.heading * (Math.PI / 180);
-            const dLat = (distanceMovedNm / 60) * Math.cos(rad);
-            const dLng = (distanceMovedNm / (60 * Math.cos(myAircraft.lat * Math.PI / 180))) * Math.sin(rad);
-
-            myAircraft.lat += dLat;
-            myAircraft.lng = normalizeLongitude(myAircraft.lng + dLng);
-
             // Update Pilot HUD telemetry
             document.getElementById('userAltVal').innerText = `${Math.round(myAircraft.alt).toLocaleString()} FT`;
             document.getElementById('userHdgVal').innerText = `${Math.round(myAircraft.heading).toString().padStart(3, '0')}°`;
             document.getElementById('userSpdVal').innerText = `${Math.round(myAircraft.speed)} KT`;
+        }
+
+        function normalizeHeading(heading) {
+            const value = Number(heading);
+            if (!Number.isFinite(value)) return 0;
+            return ((value % 360) + 360) % 360;
+        }
+
+        function isValidWaypoint(wpt) {
+            const lat = Number(wpt?.lat);
+            const lng = Number(wpt?.lng);
+            return Number.isFinite(lat) && Number.isFinite(lng) && lat >= -90 && lat <= 90;
+        }
+
+        function moveGreatCircle(aircraft, distanceNm, bearingDeg) {
+            if (!(distanceNm > 0)) return;
+
+            const earthRadiusNm = 3440.065;
+            const angularDistance = distanceNm / earthRadiusNm;
+            const bearing = normalizeHeading(bearingDeg) * Math.PI / 180;
+            const lat1 = Number(aircraft.lat) * Math.PI / 180;
+            const lon1 = Number(aircraft.lng) * Math.PI / 180;
+
+            const sinLat1 = Math.sin(lat1);
+            const cosLat1 = Math.cos(lat1);
+            const sinAd = Math.sin(angularDistance);
+            const cosAd = Math.cos(angularDistance);
+
+            const lat2 = Math.asin(
+                sinLat1 * cosAd +
+                cosLat1 * sinAd * Math.cos(bearing)
+            );
+
+            const lon2 = lon1 + Math.atan2(
+                Math.sin(bearing) * sinAd * cosLat1,
+                cosAd - sinLat1 * Math.sin(lat2)
+            );
+
+            aircraft.lat = Math.max(-89.9999, Math.min(89.9999, lat2 * 180 / Math.PI));
+            aircraft.lng = normalizeLongitude(lon2 * 180 / Math.PI);
         }
 
         function renderAllPlayers() {
@@ -1433,25 +1508,27 @@
 
         function getDistanceNm(lat1, lon1, lat2, lon2) {
             const R = 3440.065;
-            const dLat = (lat2 - lat1) * Math.PI / 180;
-            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const dLat = (Number(lat2) - Number(lat1)) * Math.PI / 180;
+            const deltaLonDeg = ((((Number(lon2) - Number(lon1) + 180) % 360) + 360) % 360) - 180;
+            const dLon = deltaLonDeg * Math.PI / 180;
+            const phi1 = Number(lat1) * Math.PI / 180;
+            const phi2 = Number(lat2) * Math.PI / 180;
             const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-                      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                      Math.cos(phi1) * Math.cos(phi2) *
                       Math.sin(dLon / 2) * Math.sin(dLon / 2);
-            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            const c = 2 * Math.atan2(Math.sqrt(Math.min(1, a)), Math.sqrt(Math.max(0, 1 - a)));
             return R * c;
         }
 
         function getBearing(lat1, lon1, lat2, lon2) {
-            const phi1 = lat1 * Math.PI / 180;
-            const phi2 = lat2 * Math.PI / 180;
-            const lambda1 = lon1 * Math.PI / 180;
-            const lambda2 = lon2 * Math.PI / 180;
+            const phi1 = Number(lat1) * Math.PI / 180;
+            const phi2 = Number(lat2) * Math.PI / 180;
+            const deltaLambda = ((((Number(lon2) - Number(lon1) + 180) % 360) + 360) % 360 - 180) * Math.PI / 180;
 
-            const y = Math.sin(lambda2 - lambda1) * Math.cos(phi2);
+            const y = Math.sin(deltaLambda) * Math.cos(phi2);
             const x = Math.cos(phi1) * Math.sin(phi2) -
-                      Math.sin(phi1) * Math.cos(phi2) * Math.cos(lambda2 - lambda1);
-            return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+                      Math.sin(phi1) * Math.cos(phi2) * Math.cos(deltaLambda);
+            return normalizeHeading(Math.atan2(y, x) * 180 / Math.PI);
         }
     </script>
 </body>
