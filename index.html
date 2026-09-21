@@ -1151,7 +1151,11 @@
                             Object.assign(myAircraft, cmd.patch);
                             myAircraft._lastAtcCommandAt = cmdAt;
                             if (Number.isFinite(Number(myAircraft.targetAlt))) myAircraft.alt = Number(myAircraft.targetAlt);
-                            if (altitudeChanged) updatePilotAltitudeUI();
+                            if (altitudeChanged) {
+                                updatePilotAltitudeUI();
+                                updatePlayerMarkerTelemetryImmediate(myUserId, myAircraft);
+                                renderAllPlayers(performance.now());
+                            }
                             updateCombatStatusUI();
                         }
                         return;
@@ -1557,6 +1561,17 @@
             };
         }
 
+        function updatePlayerMarkerTelemetryImmediate(uid, pData) {
+            const record = playerMarkers.get(uid);
+            const element = record?.marker?.getElement?.();
+            if (!element) return;
+            const telemetryEl = element.querySelector('.aircraft-telemetry');
+            if (!telemetryEl) return;
+            const alt = Math.round(Number(pData?.alt) || 0);
+            const speed = Number(pData?.speed) || 0;
+            telemetryEl.textContent = `ALT ${alt.toLocaleString()} FT • FL${Math.round(alt / 100)} • ${formatDisplaySpeed(speed)}kt`;
+        }
+
         function upsertPlayerMarker(uid, pData, isSelf, now = performance.now()) {
             if (!map) return;
             const display = getSmoothMarkerState(pData, isSelf, now);
@@ -1774,6 +1789,7 @@
                 target.targetAlt = val;
                 target.alt = val;
                 remotePlayers.set(trackedUserId, target);
+                updatePlayerMarkerTelemetryImmediate(trackedUserId, target);
 
                 // 관제 화면에서도 고도 숫자를 즉시 갱신합니다.
                 const detail = document.getElementById('trackedDetailInfo');
@@ -1943,8 +1959,17 @@
         }
 
         function isConversationRadioMessage(sender, text) {
-            const value = String(text || '');
-            const blocked = ['전투기 표적 지정', '공격 실패:', '[전투]', '통신 ID가', '의 통신 ID가', '착륙 완료.', '비행 재개.', '고도 변경:', '고도 설정.', '레이더 추적 개시', '관제 지시:'];
+            const value = String(text || '').trim();
+            const blocked = ['전투기 표적 지정', '공격 실패:', '[전투]', '통신 ID가', '의 통신 ID가', '착륙 완료.', '비행 재개.', '레이더 추적 개시', '관제 지시:'];
+
+            // 고도 변경/설정 메시지는 통신망에 기록하거나 표시하지 않습니다.
+            // 이미 Firestore에 저장된 과거 메시지도 화면에서는 숨깁니다.
+            const altitudeSystemMessage =
+                /고도\s*(?:변경|설정|지시)[:：]?/.test(value)
+                || /고도\s*[0-9,]+\s*FT\s*(?:설정|변경)/.test(value)
+                || /(?:상승|하강)\s*(?:하여|해서)?\s*고도/.test(value);
+
+            if (altitudeSystemMessage) return false;
             return !blocked.some(prefix => value.includes(prefix));
         }
 
@@ -2175,6 +2200,8 @@
             myAircraft.targetAlt = next;
             myAircraft.alt = next;
             updatePilotAltitudeUI();
+            updatePlayerMarkerTelemetryImmediate(myUserId, myAircraft);
+            renderAllPlayers(performance.now());
             pushMyStateToFirestore();
         };
 
@@ -2189,6 +2216,8 @@
             myAircraft.targetAlt = next;
             myAircraft.alt = next;
             updatePilotAltitudeUI();
+            updatePlayerMarkerTelemetryImmediate(myUserId, myAircraft);
+            renderAllPlayers(performance.now());
             pushMyStateToFirestore();
         };
 
