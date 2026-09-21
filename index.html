@@ -680,7 +680,7 @@
                     <span id="trackedSquawk" class="text-xs font-mono text-gray-400">SQK: ----</span>
                 </div>
                 <div id="trackedDetailInfo" class="text-xs text-gray-400 space-y-1">
-                    <p>목록에서 조종사를 선택하거나 콜사인을 입력하여 관제 명령을 지시하십시오.</p>
+                    <p>콜사인을 입력하여 관제 명령을 직접 입력하십시오.</p>
                 </div>
             </div>
 
@@ -1240,22 +1240,6 @@
                     myAircraft.waypoints.push({ lat: clickLat, lng: clickLng, name: wptName });
                     document.getElementById('userNextWpt').innerText = myAircraft.waypoints[0].name;
                     drawMyWaypoints();
-                }
-                // ATC MODE: Direct Tracked Pilot to Clicked Point
-                else if (myRole === 'ATC' && trackedUserId) {
-                    const targetPlayer = remotePlayers.get(trackedUserId);
-                    if (targetPlayer && canAtcControlPlayer(targetPlayer)) {
-                        const wptName = `ATC_WPT${waypointSeq++}`;
-                        targetPlayer.waypoints = [{ lat: clickLat, lng: clickLng, name: wptName }];
-                        targetPlayer.isHolding = false;
-                        try {
-                            await setDoc(doc(db, 'servers', serverId, 'players', trackedUserId), { atcRouteCommand: { issuedAt: Date.now(), waypoints: targetPlayer.waypoints, isHolding: false } }, { merge: true });
-                            logRadio(targetPlayer.id, `관제 지시: [${wptName}] 포인트로 직항(Direct) 진행.`);
-                        } catch (err) {
-                            console.error('ATC direct command failed:', err);
-                            alert('관제 직항 명령이 서버에서 거부되었습니다.');
-                        }
-                    }
                 }
             });
         }
@@ -1942,134 +1926,8 @@
             document.getElementById('atcSearchInput').value = '';
             document.getElementById('trackedCallsign').innerText = '대상 항공기 미선택';
             document.getElementById('trackedSquawk').innerText = 'SQK: ----';
-            document.getElementById('trackedDetailInfo').innerHTML = '<p>목록에서 조종사를 선택하거나 콜사인을 입력하여 관제 명령을 지시하십시오.</p>';
+            document.getElementById('trackedDetailInfo').innerHTML = '<p>콜사인을 입력하여 관제 명령을 직접 입력하십시오.</p>';
             document.getElementById('atcCommandSection').classList.add('opacity-50', 'pointer-events-none');
-        };
-
-        window.issueHeadingCommand = function() {
-            if (!trackedUserId) return;
-            const target = remotePlayers.get(trackedUserId);
-            if (!canAtcControlPlayer(target)) {
-                alert('통신 ID가 같은 항공기만 관제할 수 있습니다.');
-                clearTrackedAircraft();
-                return;
-            }
-            const val = parseFloat(document.getElementById('inputHdg').value);
-            if (target && !isNaN(val)) {
-                target.targetHeading = (val % 360 + 360) % 360;
-                target.isHolding = false;
-                setDoc(doc(db, 'servers', serverId, 'players', trackedUserId), { atcCommand: { issuedAt: Date.now(), patch: { targetHeading: target.targetHeading, isHolding: false } } }, { merge: true }).then(() => {
-                    document.getElementById('cmdHdgVal').innerText = `${Math.round(target.targetHeading)}°`;
-                    logRadio(target.id, `관제 지시: 기수 ${Math.round(target.targetHeading)}도로 선회 유지.`);
-                }).catch(err => {
-                    console.error('ATC heading update failed:', err);
-                    alert('관제 기수 명령이 서버에서 거부되었습니다.');
-                });
-            }
-        };
-
-        window.issueAltCommand = async function() {
-            if (!trackedUserId) return;
-            const target = remotePlayers.get(trackedUserId);
-            if (!canAtcControlPlayer(target)) {
-                alert('통신 ID가 같은 항공기만 관제할 수 있습니다.');
-                clearTrackedAircraft();
-                return;
-            }
-            const val = parseFloat(document.getElementById('inputAlt').value);
-            if (target && !isNaN(val)) {
-                target.targetAlt = val;
-                target.alt = val;
-                remotePlayers.set(trackedUserId, target);
-                updatePlayerMarkerTelemetryImmediate(trackedUserId, target);
-
-                // 관제 화면에서도 고도 숫자를 즉시 갱신합니다.
-                const detail = document.getElementById('trackedDetailInfo');
-                if (detail) {
-                    detail.innerHTML = `
-                        <div class="grid grid-cols-2 gap-1 text-[11px] font-mono">
-                            <div>현재 고도: <span class="text-cyan-300">${Math.round(target.alt).toLocaleString()} FT</span></div>
-                            <div>목표 고도: <span class="text-amber-300">${Math.round(target.targetAlt).toLocaleString()} FT</span></div>
-                            <div>기수: <span class="text-cyan-300">${Math.round(target.heading)}°</span></div>
-                            <div>속도: <span class="text-cyan-300">${formatDisplaySpeed(target.speed)} KT</span></div>
-                        </div>`;
-                }
-                renderAllPlayers(performance.now());
-
-                // 고도는 명령 객체에만 넣지 않고 대상 항공기의 실제 상태에 직접 기록합니다.
-                // 그래야 대상 항공기와 관제 화면 모두 Firestore snapshot으로 즉시 같은 고도를 받습니다.
-                try {
-                    // 대상 항공기의 alt를 직접 덮어쓰지 않고 관제 명령으로 전달합니다.
-                    // 파일럿은 자신의 상태를 Firestore snapshot에서 다시 덮어쓰지 않기 때문에
-                    // 오래된 12000 FT 값으로 되돌아가지 않습니다.
-                    await setDoc(
-                        doc(db, 'servers', serverId, 'players', trackedUserId),
-                        {
-                            atcCommand: {
-                                issuedAt: Date.now(),
-                                patch: { alt: val, targetAlt: val }
-                            },
-                            lastUpdated: Date.now()
-                        },
-                        { merge: true }
-                    );
-                } catch (e) {
-                    console.error('ATC altitude update failed:', e);
-                    alert('관제 고도 명령이 서버에서 거부되었습니다.');
-                    return;
-                }
-
-                document.getElementById('cmdAltVal').innerText = `${Math.round(val)} FT`;
-                }
-        };
-
-        window.adjustTargetAlt = function(delta) {
-            const input = document.getElementById('inputAlt');
-            let cur = parseFloat(input.value) || 10000;
-            cur = Math.max(1000, Math.min(45000, cur + delta));
-            input.value = cur;
-            issueAltCommand();
-        };
-
-        window.issueHoldCommand = function() {
-            if (!trackedUserId) return;
-            const target = remotePlayers.get(trackedUserId);
-            if (!canAtcControlPlayer(target)) {
-                alert('통신 ID가 같은 항공기만 관제할 수 있습니다.');
-                clearTrackedAircraft();
-                return;
-            }
-            if (target) {
-                target.isHolding = !target.isHolding;
-                setDoc(doc(db, 'servers', serverId, 'players', trackedUserId), { atcCommand: { issuedAt: Date.now(), patch: { isHolding: target.isHolding } } }, { merge: true }).then(() => {
-                    logRadio(target.id, target.isHolding ? `관제 지시: 현 위치 대기 선회(Hold) 실시.` : `관제 지시: 대기 해제.`);
-                }).catch(err => {
-                    console.error('ATC hold update failed:', err);
-                    alert('관제 Hold 명령이 서버에서 거부되었습니다.');
-                });
-            }
-        };
-
-        // 직항/관제는 버튼 없이 아래의 직접 입력 명령으로 처리합니다.
-
-        window.issueEmergencyClearance = function() {
-            if (!trackedUserId) return;
-            const target = remotePlayers.get(trackedUserId);
-            if (!canAtcControlPlayer(target)) {
-                alert('통신 ID가 같은 항공기만 관제할 수 있습니다.');
-                clearTrackedAircraft();
-                return;
-            }
-            if (target) {
-                target.isEmergency = !target.isEmergency;
-                target.squawk = target.isEmergency ? "7700" : "7000";
-                setDoc(doc(db, 'servers', serverId, 'players', trackedUserId), { atcCommand: { issuedAt: Date.now(), patch: { isEmergency: target.isEmergency, squawk: target.squawk } } }, { merge: true }).then(() => {
-                    logRadio(target.id, target.isEmergency ? `[비상 승인] 비상착륙 공역 진입 승인 완료.` : `비상 상태 해제.`);
-                }).catch(err => {
-                    console.error('ATC emergency update failed:', err);
-                    alert('관제 비상 명령이 서버에서 거부되었습니다.');
-                });
-            }
         };
 
         function findAtcTargetByCallsign(callsign) {
