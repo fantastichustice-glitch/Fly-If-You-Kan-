@@ -797,6 +797,10 @@
         const playerMarkers = new Map(); // userId -> { marker, trailPolyline, emergencyCircle }
         
         let lastTimestamp = performance.now();
+        // 물리/Firestore 동기화 주기용 타이머입니다.
+        // 이 변수가 선언되어 있지 않으면 requestAnimationFrame 루프가
+        // 첫 프레임 이후 ReferenceError로 중단되어 기체가 움직이지 않습니다.
+        let lastGameSync = 0;
         let trackedUserId = null;
         let waypointSeq = 1;
         const MARKER_RENDER_INTERVAL_MS = 33;
@@ -1235,6 +1239,10 @@
         }
 
         function startPhysicsAndSyncLoop() {
+            // 세션을 다시 시작해도 이전 프레임 시간으로 큰 dt가 계산되지 않도록 초기화합니다.
+            lastTimestamp = performance.now();
+            lastGameSync = 0;
+
             if (heartbeatTimer) {
                 clearInterval(heartbeatTimer);
                 heartbeatTimer = null;
