@@ -943,6 +943,11 @@
         // 이 변수가 선언되어 있지 않으면 requestAnimationFrame 루프가
         // 첫 프레임 이후 ReferenceError로 중단되어 기체가 움직이지 않습니다.
         let lastGameSync = 0;
+
+        // Firestore 쓰기가 겹치면 오래 전에 시작된 12000 FT 저장이
+        // 새 고도보다 늦게 반영되어 현재 고도를 다시 덮어쓸 수 있습니다.
+        // 모든 상태 저장을 순서대로 처리해 이런 역전 현상을 막습니다.
+        let stateWriteChain = Promise.resolve();
         let trackedUserId = null;
         let waypointSeq = 1;
         const MARKER_RENDER_INTERVAL_MS = 33;
@@ -1304,6 +1309,10 @@
                     const uid = docSnap.id;
 
                     if (uid === myUserId) {
+                        // 자신의 일반 상태(alt/targetAlt 포함)는 Firestore snapshot으로
+                        // 다시 덮어쓰지 않습니다. 과거 저장 요청이 늦게 반영되면
+                        // 12000 FT 같은 오래된 값으로 되돌아가는 문제가 생길 수 있습니다.
+                        // ATC의 변경은 atcCommand / atcRouteCommand로만 받습니다.
                         const routeCmd = data.atcRouteCommand;
                         const routeAt = Number(routeCmd?.issuedAt) || 0;
                         if (myRole === 'PILOT' && routeAt > Number(myAircraft._lastAtcRouteCommandAt || 0) && Array.isArray(routeCmd?.waypoints)) {
@@ -1315,21 +1324,6 @@
                             const nextWptEl = document.getElementById('userNextWpt');
                             if (nextWptEl) nextWptEl.innerText = myAircraft.waypoints[0]?.name || 'DIRECT HEADING';
                             drawMyWaypoints();
-                        }
-
-                        // ATC가 고도를 직접 갱신한 경우에는 snapshot의 실제 고도값을 즉시 반영합니다.
-                        // 이렇게 해야 예전 고도값이 다시 덮어쓰여 보이는 현상을 막을 수 있습니다.
-                        if (myRole === 'PILOT') {
-                            const incomingAlt = Number(data.alt);
-                            const incomingTargetAlt = Number(data.targetAlt);
-                            if (Number.isFinite(incomingAlt) && Number.isFinite(incomingTargetAlt)
-                                && (incomingAlt !== Number(myAircraft.alt) || incomingTargetAlt !== Number(myAircraft.targetAlt))) {
-                                myAircraft.alt = incomingAlt;
-                                myAircraft.targetAlt = incomingTargetAlt;
-                                updatePilotAltitudeUI();
-                                updatePlayerMarkerTelemetryImmediate(myUserId, myAircraft);
-                                renderAllPlayers(performance.now());
-                            }
                         }
 
                         const cmd = data.atcCommand;
@@ -1414,17 +1408,33 @@
             // 서버는 lastUpdated 타임아웃으로 오프라인 플레이어를 정리합니다.
         });
 
-        async function pushMyStateToFirestore() {
-            if (!auth?.currentUser || !db || !serverId) return;
-            try {
-                myAircraft.role = myRole;
-                myAircraft.online = true;
-                myAircraft.lastUpdated = Date.now();
-                const safeAircraft = { ...myAircraft };
-                delete safeAircraft._lastAtcCommandAt;
-                delete safeAircraft._lastAtcRouteCommandAt;
-                await setDoc(doc(db, 'servers', serverId, 'players', myUserId), safeAircraft, { merge: true });
-            } catch (e) { console.error('Game state sync failed:', e); }
+        function pushMyStateToFirestore() {
+            if (!auth?.currentUser || !db || !serverId) return Promise.resolve();
+
+            // 호출 시점의 상태를 먼저 복사합니다.
+            // 이후 다른 비동기 작업이 myAircraft를 바꾸더라도 이 저장 요청 자체는
+            // 호출 당시 상태를 보존합니다.
+            myAircraft.role = myRole;
+            myAircraft.online = true;
+            myAircraft.lastUpdated = Math.max(Number(myAircraft.lastUpdated) || 0, Date.now());
+            const safeAircraft = { ...myAircraft };
+            delete safeAircraft._lastAtcCommandAt;
+            delete safeAircraft._lastAtcRouteCommandAt;
+
+            // Firestore 저장을 한 줄로 직렬화하여 오래된 저장이 최신 저장보다
+            // 뒤늦게 완료되는 역전 현상을 방지합니다.
+            stateWriteChain = stateWriteChain
+                .catch(() => {})
+                .then(() => setDoc(
+                    doc(db, 'servers', serverId, 'players', myUserId),
+                    safeAircraft,
+                    { merge: true }
+                ))
+                .catch(e => {
+                    console.error('Game state sync failed:', e);
+                });
+
+            return stateWriteChain;
         }
 
         function startPhysicsAndSyncLoop() {
@@ -1989,9 +1999,18 @@
                 // 고도는 명령 객체에만 넣지 않고 대상 항공기의 실제 상태에 직접 기록합니다.
                 // 그래야 대상 항공기와 관제 화면 모두 Firestore snapshot으로 즉시 같은 고도를 받습니다.
                 try {
+                    // 대상 항공기의 alt를 직접 덮어쓰지 않고 관제 명령으로 전달합니다.
+                    // 파일럿은 자신의 상태를 Firestore snapshot에서 다시 덮어쓰지 않기 때문에
+                    // 오래된 12000 FT 값으로 되돌아가지 않습니다.
                     await setDoc(
                         doc(db, 'servers', serverId, 'players', trackedUserId),
-                        { alt: val, targetAlt: val, lastUpdated: Date.now() },
+                        {
+                            atcCommand: {
+                                issuedAt: Date.now(),
+                                patch: { alt: val, targetAlt: val }
+                            },
+                            lastUpdated: Date.now()
+                        },
                         { merge: true }
                     );
                 } catch (e) {
@@ -2102,8 +2121,20 @@
                 if (match) {
                     const val = Number(match[1].replace(/,/g, ''));
                     if (!Number.isFinite(val) || val < 0 || val > 60000) throw new Error('고도는 0~60,000 FT 사이여야 합니다.');
-                    await setDoc(doc(db, 'servers', serverId, 'players', uid), { alt: val, targetAlt: val, lastUpdated: Date.now() }, { merge: true });
-                    target.alt = val; target.targetAlt = val; remotePlayers.set(uid, target);
+                    await setDoc(
+                        doc(db, 'servers', serverId, 'players', uid),
+                        {
+                            atcCommand: {
+                                issuedAt: Date.now(),
+                                patch: { alt: val, targetAlt: val }
+                            },
+                            lastUpdated: Date.now()
+                        },
+                        { merge: true }
+                    );
+                    target.alt = val;
+                    target.targetAlt = val;
+                    remotePlayers.set(uid, target);
                     updatePlayerMarkerTelemetryImmediate(uid, target);
                     renderAllPlayers(performance.now());
                     setAtcCommandStatus(`${callsign} 고도 ${val.toLocaleString()} FT 설정 완료.`);
