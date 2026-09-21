@@ -1146,9 +1146,12 @@
                         const cmd = data.atcCommand;
                         const cmdAt = Number(cmd?.issuedAt) || 0;
                         if (myRole === 'PILOT' && cmdAt > Number(myAircraft._lastAtcCommandAt || 0) && cmd?.patch && typeof cmd.patch === 'object') {
+                            const altitudeChanged = Object.prototype.hasOwnProperty.call(cmd.patch, 'alt')
+                                || Object.prototype.hasOwnProperty.call(cmd.patch, 'targetAlt');
                             Object.assign(myAircraft, cmd.patch);
                             myAircraft._lastAtcCommandAt = cmdAt;
                             if (Number.isFinite(Number(myAircraft.targetAlt))) myAircraft.alt = Number(myAircraft.targetAlt);
+                            if (altitudeChanged) updatePilotAltitudeUI();
                             updateCombatStatusUI();
                         }
                         return;
@@ -1523,7 +1526,7 @@
                             <div class="font-bold flex items-center gap-1">
                                 ${pData.id} [${visual.label}] ${pData.isLanded ? '<span class="text-gray-400">LANDED</span>' : ''} ${pData.isDisabled || pData.gameOver ? '<span class="text-red-500 font-black">GAME OVER</span>' : ''} ${pData.requiresEmergencyLanding ? '<span class="text-amber-300 font-black">EMERGENCY</span>' : ''} ${pData.isEmergency ? '<span class="text-red-500 font-black">!</span>' : ''}
                             </div>
-                            <div>ALT ${Math.round(pData.alt || 0).toLocaleString()} FT • FL${Math.round((pData.alt || 0) / 100)} • ${formatDisplaySpeed(pData.speed || 0)}kt</div>
+                            <div class="aircraft-telemetry">ALT ${Math.round(pData.alt || 0).toLocaleString()} FT • FL${Math.round((pData.alt || 0) / 100)} • ${formatDisplaySpeed(pData.speed || 0)}kt</div>
                         </div>
                     </div>
                 `
@@ -1593,6 +1596,12 @@
                 }
                 if (record.symbolEl) {
                     record.symbolEl.style.transform = `rotate(${display.heading}deg)`;
+                }
+
+                // 고도/속도는 아이콘을 다시 만들지 않고 텍스트만 즉시 갱신합니다.
+                const telemetryEl = record.marker.getElement()?.querySelector('.aircraft-telemetry');
+                if (telemetryEl) {
+                    telemetryEl.textContent = `ALT ${Math.round(Number(pData.alt) || 0).toLocaleString()} FT • FL${Math.round((Number(pData.alt) || 0) / 100)} • ${formatDisplaySpeed(pData.speed || 0)}kt`;
                 }
 
                 // 기체 종류/상태가 바뀔 때만 아이콘 DOM을 교체합니다.
@@ -1766,6 +1775,19 @@
                 target.alt = val;
                 remotePlayers.set(trackedUserId, target);
 
+                // 관제 화면에서도 고도 숫자를 즉시 갱신합니다.
+                const detail = document.getElementById('trackedDetailInfo');
+                if (detail) {
+                    detail.innerHTML = `
+                        <div class="grid grid-cols-2 gap-1 text-[11px] font-mono">
+                            <div>현재 고도: <span class="text-cyan-300">${Math.round(target.alt).toLocaleString()} FT</span></div>
+                            <div>목표 고도: <span class="text-amber-300">${Math.round(target.targetAlt).toLocaleString()} FT</span></div>
+                            <div>기수: <span class="text-cyan-300">${Math.round(target.heading)}°</span></div>
+                            <div>속도: <span class="text-cyan-300">${formatDisplaySpeed(target.speed)} KT</span></div>
+                        </div>`;
+                }
+                renderAllPlayers(performance.now());
+
                 // 관제사가 지정한 항공기의 고도를 서버에도 즉시 반영
                 try {
                     await setDoc(doc(db, 'servers', serverId, 'players', trackedUserId), { atcCommand: { issuedAt: Date.now(), patch: { alt: val, targetAlt: val } } }, { merge: true });
@@ -1774,8 +1796,7 @@
                 }
 
                 document.getElementById('cmdAltVal').innerText = `${Math.round(val)} FT`;
-                logRadio(target.id, `관제 지시: 고도 ${Math.round(val)}피트로 즉시 변경.`);
-            }
+                }
         };
 
         window.adjustTargetAlt = function(delta) {
@@ -2137,14 +2158,23 @@
             }
         }
 
+        function updatePilotAltitudeUI() {
+            const alt = Math.round(Number(myAircraft.alt) || 0);
+            const targetAlt = Math.round(Number(myAircraft.targetAlt) || alt);
+            const input = document.getElementById('pilotAltInput');
+            const targetLabel = document.getElementById('pilotTargetAltVal');
+            const currentLabel = document.getElementById('userAltVal');
+            if (input) input.value = targetAlt;
+            if (targetLabel) targetLabel.innerText = `목표 ${targetAlt.toLocaleString()} FT`;
+            if (currentLabel) currentLabel.innerText = `${alt.toLocaleString()} FT`;
+        }
+
         window.adjustPilotAltitude = function(delta) {
             if (myRole !== 'PILOT') return;
             const next = Math.max(0, Math.min(60000, Math.round((myAircraft.targetAlt + delta) / 500) * 500));
             myAircraft.targetAlt = next;
             myAircraft.alt = next;
-            document.getElementById('pilotAltInput').value = next;
-            document.getElementById('pilotTargetAltVal').innerText = `목표 ${next.toLocaleString()} FT`;
-            logRadio(myCallsign, `고도 변경: ${next.toLocaleString()} FT 유지.`);
+            updatePilotAltitudeUI();
             pushMyStateToFirestore();
         };
 
@@ -2158,9 +2188,7 @@
             const next = Math.round(input / 100) * 100;
             myAircraft.targetAlt = next;
             myAircraft.alt = next;
-            document.getElementById('pilotAltInput').value = next;
-            document.getElementById('pilotTargetAltVal').innerText = `목표 ${next.toLocaleString()} FT`;
-            logRadio(myCallsign, `고도 ${next.toLocaleString()} FT 설정.`);
+            updatePilotAltitudeUI();
             pushMyStateToFirestore();
         };
 
