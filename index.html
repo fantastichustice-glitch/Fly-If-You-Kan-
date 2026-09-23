@@ -736,7 +736,7 @@
                 <span class="text-xs font-bold text-emerald-300 flex items-center gap-1.5">
                     <i class="fa-solid fa-robot"></i> BOT 항공기 (<span id="botCount">0</span>)
                 </span>
-                <span class="text-[10px] text-gray-500">추적 / 탑승</span>
+                <span class="text-[10px] text-gray-500">100대 독립 비행 · 추적 / 탑승</span>
             </div>
             <div id="botList" class="overflow-y-auto space-y-1 pr-1 text-xs font-mono"></div>
             <button onclick="clearTrackedAircraft()" class="mt-2 w-full py-1.5 rounded bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 text-[10px] font-bold">
@@ -750,7 +750,7 @@
                 <span class="text-xs font-bold text-amber-300"><i class="fa-solid fa-headset mr-1"></i> 관제봇</span>
                 <span id="atcBotStatus" class="text-[9px] text-emerald-400">ONLINE</span>
             </div>
-            <div class="text-[10px] text-gray-400 leading-relaxed">SEOUL CONTROL · COMM ${atcBot.channel}<br>항공기를 직접 조종하지 않고 교통/비상 상황을 무전으로 안내합니다.</div>
+            <div class="text-[10px] text-gray-400 leading-relaxed">SEOUL CONTROL · COMM <span id="atcBotChannel">120.5</span><br>다음 관제소 핸드오프와 통신 ID 변경을 무전으로 안내합니다.<br>BOT는 관제소 변경 시 자동으로 새 통신 ID로 전환합니다.</div>
             <button onclick="toggleAtcBot()" id="atcBotToggle" class="mt-2 w-full py-1.5 rounded bg-amber-900/40 hover:bg-amber-900/60 border border-amber-500/30 text-amber-200 text-[10px] font-bold">관제봇 끄기</button>
         </div>
 
@@ -968,7 +968,7 @@
         const remotePlayers = new Map();
 
         // --- Local BOT Aircraft System ---
-        // 하나의 엔진으로 최대 100대의 BOT을 생성합니다. Firebase 동기화 없이 브라우저에서 계산합니다.
+        // 최대 100대의 BOT이 각각 독립된 위치/속도/고도/경로/통신 ID를 가집니다.
         const MAX_BOT_AIRCRAFT = 100;
         const botAircraft = new Map();
         let botSeed = Math.floor(Math.random() * 0x7fffffff);
@@ -976,15 +976,24 @@
         let trackedTargetId = null;
         let playerBoardedBotId = null;
 
-        // --- Local ATC BOT ---
-        // 항공기를 직접 조종하지 않고 무전/교통 안내만 수행합니다.
+        // BOT가 이동하는 공역과 관제소입니다.
+        // BOT는 공역 경계를 통과하면 다음 관제소로 자동 핸드오프합니다.
+        const CONTROL_TOWERS = [
+            { id: 'SEOUL CONTROL', channel: '120.5', lat: 37.56, lng: 126.80, radiusNm: 45 },
+            { id: 'INCHEON APPROACH', channel: '118.0', lat: 37.47, lng: 126.44, radiusNm: 35 },
+            { id: 'DAEGU APPROACH', channel: '125.0', lat: 35.90, lng: 128.66, radiusNm: 35 },
+            { id: 'BUSAN APPROACH', channel: '128.5', lat: 35.18, lng: 129.13, radiusNm: 35 },
+            { id: 'JEJU APPROACH', channel: '121.5', lat: 33.51, lng: 126.49, radiusNm: 35 }
+        ];
+
         const atcBot = {
             id: 'SEOUL CONTROL',
             channel: '120.5',
             enabled: true,
             lastMessageAt: 0,
             intervalMs: 9000,
-            lastTargetId: null
+            lastTargetId: null,
+            handoffNoticeCache: new Map()
         };
 
         function seededRandom(seedObj) {
@@ -992,25 +1001,72 @@
             return seedObj.value / 4294967296;
         }
 
-        function randomBotRoute(rng, count = 4) {
+        function controlTowerById(id) {
+            return CONTROL_TOWERS.find(t => t.id === id) || CONTROL_TOWERS[0];
+        }
+
+        function nearestControlTower(lat, lng) {
+            let best = CONTROL_TOWERS[0];
+            let bestDist = Infinity;
+            for (const tower of CONTROL_TOWERS) {
+                const d = getDistanceNm(lat, lng, tower.lat, tower.lng);
+                if (d < bestDist) { best = tower; bestDist = d; }
+            }
+            return { tower: best, distanceNm: bestDist };
+        }
+
+        function nextTowerIndex(index) {
+            return (Number(index) + 1) % CONTROL_TOWERS.length;
+        }
+
+        function makeBotWaypoints(rng, startLat, startLng, targetTower, count = 3) {
             const route = [];
-            for (let i = 0; i < count; i++) {
+            const steps = Math.max(2, Math.min(5, count));
+            for (let i = 1; i <= steps; i++) {
+                const ratio = i / steps;
+                const jitterLat = (rng() - 0.5) * 1.4;
+                const jitterLng = (rng() - 0.5) * 1.8;
                 route.push({
-                    lat: -55 + rng() * 110,
-                    lng: -180 + rng() * 360,
-                    name: `B${i + 1}`
+                    lat: startLat + (targetTower.lat - startLat) * ratio + jitterLat,
+                    lng: normalizeLongitude(startLng + (targetTower.lng - startLng) * ratio + jitterLng),
+                    name: `${targetTower.id} WP-${i}`,
+                    towerId: i === steps ? targetTower.id : null
                 });
             }
             return route;
+        }
+
+        function deterministicSpawnPosition(index) {
+            // 10 x 10 격자 + 작은 지터: 100대가 같은 좌표에 겹치지 않고 한국 공역 전체에 분산됩니다.
+            const row = Math.floor(index / 10);
+            const col = index % 10;
+            const jitterSeed = ((botSeed + index * 104729) >>> 0) || 1;
+            const state = { value: jitterSeed };
+            const rng = () => seededRandom(state);
+            return {
+                lat: 31.0 + row * 1.15 + (rng() - 0.5) * 0.45,
+                lng: 123.8 + col * 1.00 + (rng() - 0.5) * 0.45
+            };
         }
 
         function createBotAircraft(index, seed = null, custom = {}) {
             const actualSeed = Number.isFinite(Number(seed)) ? Number(seed) >>> 0 : ((botSeed + index * 7919) >>> 0);
             const state = { value: actualSeed || 1 };
             const rng = () => seededRandom(state);
-            const types = ['AIRLINER', 'AIRLINER', 'AIRLINER', 'FIGHTER', 'HELICOPTER'];
+            const types = ['AIRLINER', 'AIRLINER', 'AIRLINER', 'AIRLINER', 'FIGHTER', 'HELICOPTER'];
             const type = custom.aircraftType || types[Math.floor(rng() * types.length)];
             const id = custom.id || `${botCodePrefix}-${String(index + 1).padStart(3, '0')}`;
+            const spawn = (Number.isFinite(Number(custom.lat)) && Number.isFinite(Number(custom.lng)))
+                ? { lat: Number(custom.lat), lng: Number(custom.lng) }
+                : deterministicSpawnPosition(index);
+
+            const startTowerIndex = Number.isFinite(Number(custom.towerIndex))
+                ? (Number(custom.towerIndex) % CONTROL_TOWERS.length + CONTROL_TOWERS.length) % CONTROL_TOWERS.length
+                : index % CONTROL_TOWERS.length;
+            const currentTower = CONTROL_TOWERS[startTowerIndex];
+            const nextIndex = nextTowerIndex(startTowerIndex);
+            const targetTower = CONTROL_TOWERS[nextIndex];
+
             const bot = {
                 uid: `bot-${actualSeed}-${index}`,
                 id,
@@ -1018,8 +1074,8 @@
                 isBot: true,
                 botSeed: actualSeed,
                 aircraftType: type,
-                lat: Number.isFinite(Number(custom.lat)) ? Number(custom.lat) : (-55 + rng() * 110),
-                lng: Number.isFinite(Number(custom.lng)) ? Number(custom.lng) : (-180 + rng() * 360),
+                lat: spawn.lat,
+                lng: normalizeLongitude(spawn.lng),
                 alt: Number.isFinite(Number(custom.alt)) ? Number(custom.alt) : Math.round((8000 + rng() * 30000) / 500) * 500,
                 targetAlt: 0,
                 speed: 0,
@@ -1027,10 +1083,16 @@
                 heading: rng() * 360,
                 targetHeading: 0,
                 squawk: String(1000 + Math.floor(rng() * 8000)).padStart(4, '0'),
-                atcChannel: custom.atcChannel || ['118.0','120.5','121.5','125.0','128.5'][Math.floor(rng() * 5)],
+                atcChannel: normalizeAtcChannel(custom.atcChannel || currentTower.channel),
+                currentTowerId: currentTower.id,
+                nextTowerId: targetTower.id,
+                towerIndex: startTowerIndex,
+                lastHandoffAt: 0,
                 isLanded: false,
                 isDisabled: false,
-                waypoints: Array.isArray(custom.waypoints) && custom.waypoints.length ? custom.waypoints.map(w => ({...w})) : randomBotRoute(rng, 3 + Math.floor(rng() * 3)),
+                waypoints: Array.isArray(custom.waypoints) && custom.waypoints.length
+                    ? custom.waypoints.map(w => ({...w}))
+                    : makeBotWaypoints(rng, spawn.lat, spawn.lng, targetTower, 2 + Math.floor(rng() * 3)),
                 isHolding: false,
                 isEmergency: false,
                 requiresEmergencyLanding: false,
@@ -1040,9 +1102,47 @@
                 behavior: 'ROUTE'
             };
             bot.targetAlt = bot.alt;
-            bot.speed = bot.targetSpeed = custom.speed || getCruiseSpeedForAircraft(type);
+            bot.speed = bot.targetSpeed = Number(custom.speed) || getCruiseSpeedForAircraft(type);
             bot.targetHeading = bot.heading;
             return bot;
+        }
+
+        function handoffBotToNextTower(bot, arrivedTowerId) {
+            if (!bot || !bot.isBot) return;
+            const arrivedIndex = CONTROL_TOWERS.findIndex(t => t.id === arrivedTowerId);
+            if (arrivedIndex < 0) return;
+            const arrivedTower = CONTROL_TOWERS[arrivedIndex];
+            const previousTower = controlTowerById(bot.currentTowerId);
+            if (previousTower.id === arrivedTower.id && normalizeAtcChannel(bot.atcChannel) === normalizeAtcChannel(arrivedTower.channel)) return;
+
+            // 실제 핸드오프: 이전 관제소가 새 관제소의 통신 ID를 지시하고,
+            // BOT은 새 관제소에 진입하는 순간 그 주파수로 자동 전환합니다.
+            appendRadioMessage(previousTower.id, `${bot.id}, 다음 관제구역 ${arrivedTower.id}입니다. 통신 ID를 ${arrivedTower.channel}으로 변경하십시오.`, Date.now());
+
+            bot.towerIndex = arrivedIndex;
+            bot.currentTowerId = arrivedTower.id;
+            bot.atcChannel = normalizeAtcChannel(arrivedTower.channel);
+            const nextIndex = nextTowerIndex(arrivedIndex);
+            const nextTower = CONTROL_TOWERS[nextIndex];
+            bot.nextTowerId = nextTower.id;
+            bot.lastHandoffAt = Date.now();
+
+            appendRadioMessage(arrivedTower.id, `${bot.id}, ${arrivedTower.channel} 교신 시작. 다음 목적 관제구역은 ${nextTower.id}입니다.`, Date.now());
+
+            const state = { value: (Number(bot.botSeed) + arrivedIndex * 7919 + Math.floor(bot.lastHandoffAt / 1000)) >>> 0 };
+            const rng = () => seededRandom(state);
+            bot.waypoints = makeBotWaypoints(rng, bot.lat, bot.lng, nextTower, 2 + Math.floor(rng() * 3));
+            bot.targetAlt = Math.max(5000, Math.min(45000, Math.round((8000 + rng() * 30000) / 500) * 500));
+            bot.alt = bot.targetAlt;
+        }
+
+        function checkTowerZone(bot) {
+            if (!bot || !bot.isBot) return;
+            const nextTower = controlTowerById(bot.nextTowerId);
+            const distance = getDistanceNm(bot.lat, bot.lng, nextTower.lat, nextTower.lng);
+            if (distance <= nextTower.radiusNm && Date.now() - Number(bot.lastHandoffAt || 0) > 15000) {
+                handoffBotToNextTower(bot, nextTower.id);
+            }
         }
 
         function spawnBotFleet(count = MAX_BOT_AIRCRAFT) {
@@ -1064,17 +1164,19 @@
             let remainingNm = Math.max(0, (Number(bot.speed) || 0) / 3600 * Math.min(Math.max(dt, 0), 0.2));
             while (remainingNm > 0) {
                 if (!Array.isArray(bot.waypoints) || bot.waypoints.length === 0) {
-                    const state = { value: (Number(bot.botSeed) + Math.floor(performance.now() / 1000)) >>> 0 };
+                    const tower = controlTowerById(bot.nextTowerId);
+                    const state = { value: (Number(bot.botSeed) + bot.towerIndex * 7919) >>> 0 };
                     const rng = () => seededRandom(state);
-                    bot.waypoints = randomBotRoute(rng, 3 + Math.floor(rng() * 3));
+                    bot.waypoints = makeBotWaypoints(rng, bot.lat, bot.lng, tower, 3);
                 }
                 const wpt = bot.waypoints[0];
                 const dist = getDistanceNm(bot.lat, bot.lng, wpt.lat, wpt.lng);
                 if (dist <= 0.05) {
                     bot.lat = Number(wpt.lat); bot.lng = normalizeLongitude(Number(wpt.lng));
                     bot.waypoints.shift();
-                    bot.alt = Math.max(3000, Math.min(60000, Math.round((7000 + Math.random() * 33000) / 500) * 500));
+                    bot.alt = Math.max(3000, Math.min(60000, Math.round((7000 + ((Number(bot.botSeed) + bot.towerIndex * 997) % 33000)) / 500) * 500));
                     bot.targetAlt = bot.alt;
+                    if (wpt.towerId) handoffBotToNextTower(bot, wpt.towerId);
                     continue;
                 }
                 bot.targetHeading = getBearing(bot.lat, bot.lng, wpt.lat, wpt.lng);
@@ -1083,11 +1185,13 @@
                     bot.lat = Number(wpt.lat); bot.lng = normalizeLongitude(Number(wpt.lng));
                     remainingNm -= dist;
                     bot.waypoints.shift();
+                    if (wpt.towerId) handoffBotToNextTower(bot, wpt.towerId);
                 } else {
                     moveGreatCircle(bot, remainingNm, bot.heading);
                     remainingNm = 0;
                 }
             }
+            checkTowerZone(bot);
             bot.lastUpdated = Date.now();
         }
 
@@ -1095,9 +1199,26 @@
             botAircraft.forEach(bot => updateBotAircraft(bot, dt));
         }
 
+        // 플레이어도 다음 관제구역에 들어가면 관제봇이 다음 통신 ID를 안내합니다.
+        // 항공기를 직접 조종하는 대신 '몇 번으로 변경하세요'라는 무전 지시만 합니다.
+        function checkPlayerTowerHandoff() {
+            if (myRole !== 'PILOT' || !atcBot.enabled || myAircraft.isLanded) return;
+            const nearest = nearestControlTower(myAircraft.lat, myAircraft.lng);
+            const current = normalizeAtcChannel(myAircraft.atcChannel);
+            if (nearest.distanceNm > nearest.tower.radiusNm || current === normalizeAtcChannel(nearest.tower.channel)) return;
+            const cacheKey = `${myUserId}:${nearest.tower.id}:${nearest.tower.channel}`;
+            if (atcBot.handoffNoticeCache.get(cacheKey)) return;
+            atcBot.handoffNoticeCache.set(cacheKey, Date.now());
+            appendRadioMessage(nearest.tower.id, `${myCallsign}, 다음 관제구역 진입. 통신 ID를 ${nearest.tower.channel}으로 변경하세요.`, Date.now());
+        }
+
         window.trackAircraft = function(uid) {
             const target = uid === myUserId ? myAircraft : remotePlayers.get(uid);
             if (!target) return;
+            if (trackedTargetId === uid) {
+                clearTrackedAircraft();
+                return;
+            }
             trackedTargetId = uid;
             trackedUserId = uid;
             lastAtcPanAt = 0;
@@ -1107,7 +1228,7 @@
             const detail = document.getElementById('trackedDetailInfo');
             if (name) name.textContent = target.id || 'UNKNOWN';
             if (sqk) sqk.textContent = `SQK: ${target.squawk || '----'}`;
-            if (detail) detail.innerHTML = `<div class="grid grid-cols-2 gap-1 text-[11px] font-mono"><div>고도: <span class="text-cyan-300">${Math.round(target.alt || 0).toLocaleString()} FT</span></div><div>속도: <span class="text-cyan-300">${formatDisplaySpeed(target.speed || 0)} KT</span></div><div>기수: <span class="text-cyan-300">${Math.round(target.heading || 0)}°</span></div><div>통신 ID: <span class="text-amber-300">${target.atcChannel || '---'}</span></div></div><div class="mt-2 text-emerald-300">${target.isBot ? '🤖 BOT 항공기' : '👤 플레이어 항공기'}</div>`;
+            if (detail) detail.innerHTML = `<div class="grid grid-cols-2 gap-1 text-[11px] font-mono"><div>고도: <span class="text-cyan-300">${Math.round(target.alt || 0).toLocaleString()} FT</span></div><div>속도: <span class="text-cyan-300">${formatDisplaySpeed(target.speed || 0)} KT</span></div><div>기수: <span class="text-cyan-300">${Math.round(target.heading || 0)}°</span></div><div>통신 ID: <span class="text-amber-300">${target.atcChannel || '---'}</span></div></div><div class="mt-2 text-emerald-300">${target.isBot ? '🤖 BOT 항공기' : '👤 플레이어 항공기'}</div><div class="mt-1 text-gray-400">관제소: ${target.currentTowerId || '---'} → ${target.nextTowerId || '---'}</div>`;
             updatePlayersUIList();
         };
 
@@ -1117,9 +1238,7 @@
             if (myRole !== 'PILOT') { alert('조종사 모드에서만 BOT 항공기에 탑승할 수 있습니다.'); return; }
             if (!confirm(`${bot.id}에 탑승할까요?\n현재 비행기는 교체됩니다.`)) return;
 
-            // 탑승 전에 추적을 완전히 해제합니다. 탑승 후 새 기체가 자동으로 다시 추적되지 않습니다.
             clearTrackedAircraft();
-
             const oldPlayerAircraft = { ...myAircraft };
             myAircraft = {
                 ...bot,
@@ -1127,23 +1246,26 @@
                 isBot: false,
                 id: myCallsign,
                 role: 'PILOT',
-                atcChannel,
+                atcChannel: normalizeAtcChannel(bot.atcChannel || atcChannel),
                 waypoints: Array.isArray(bot.waypoints) ? bot.waypoints.map(w => ({...w})) : [],
                 lastUpdated: Date.now()
             };
+            atcChannel = myAircraft.atcChannel;
             myAircraftType = myAircraft.aircraftType;
 
-            // 탑승한 BOT은 목록에서 제거하고, 기존 내 기체는 BOT으로 남겨 공역을 유지합니다.
             botAircraft.delete(uid);
             remotePlayers.delete(uid);
-            const replacementIndex = botAircraft.size + 1000;
+            const replacementIndex = Number(String(bot.id).match(/(\d+)$/)?.[1] || (botAircraft.size + 1));
             const replacement = createBotAircraft(replacementIndex, (Number(bot.botSeed) + 104729) >>> 0, {
                 aircraftType: oldPlayerAircraft.aircraftType,
                 lat: oldPlayerAircraft.lat,
                 lng: oldPlayerAircraft.lng,
                 alt: oldPlayerAircraft.alt,
-                atcChannel: oldPlayerAircraft.atcChannel
+                atcChannel: oldPlayerAircraft.atcChannel,
+                id: bot.id
             });
+            // 동일 콜사인/독립 UID로 교체 BOT을 유지합니다.
+            replacement.uid = `bot-${replacement.botSeed}-${replacementIndex}-${Date.now()}`;
             botAircraft.set(replacement.uid, replacement);
             remotePlayers.set(replacement.uid, replacement);
 
@@ -1155,23 +1277,21 @@
             document.getElementById('pilotTitleCallsign').innerText = `${myAircraftType === 'FIGHTER' ? 'FIGHTER' : myAircraftType === 'HELICOPTER' ? 'COMBAT HELI' : myAircraftType === 'TERRORIST' ? 'TERRORIST' : 'MY AIRCRAFT'} (${myCallsign})`;
             document.getElementById('btnAttack')?.classList.toggle('hidden', !(myRole === 'PILOT' && isCombatAircraftType(myAircraftType)));
             document.getElementById('combatTargetInfo')?.classList.toggle('hidden', !(myRole === 'PILOT' && isCombatAircraftType(myAircraftType)));
+            document.getElementById('channelDisplay').innerText = atcChannel;
             syncHelicopterSpeedControl();
             updatePlayersUIList();
             renderAllPlayers(performance.now());
         };
 
-        // 추적은 언제든 완전히 종료할 수 있도록 BOT 패널에서도 사용합니다.
         window.toggleAircraftTracking = function(uid) {
-            if (trackedTargetId === uid) {
-                clearTrackedAircraft();
-            } else {
-                trackAircraft(uid);
-            }
+            if (trackedTargetId === uid) clearTrackedAircraft();
+            else trackAircraft(uid);
         };
 
         function runAtcBot(now = performance.now()) {
             if (!atcBot.enabled || now - atcBot.lastMessageAt < atcBot.intervalMs) return;
             atcBot.lastMessageAt = now;
+            checkPlayerTowerHandoff();
 
             const candidates = [];
             if (myRole === 'PILOT' && normalizeAtcChannel(myAircraft.atcChannel) === normalizeAtcChannel(atcBot.channel)) {
@@ -1184,23 +1304,19 @@
             });
             if (!candidates.length) return;
 
-            // 같은 통신 ID의 항공기 중 하나를 선택해 간단한 교통 안내를 보냅니다.
             const target = candidates[Math.floor(Math.random() * candidates.length)];
             const a = target.aircraft;
             let message;
+            const tower = controlTowerById(a.currentTowerId || atcBot.id);
             if (a.isEmergency || a.requiresEmergencyLanding) {
-                message = `${a.id}, 서울 관제입니다. 비상 상태 확인했습니다. 주변 교통을 확인하며 안전하게 비행하십시오.`;
+                message = `${a.id}, ${tower.id}입니다. 비상 상태 확인했습니다. 주변 교통 확인 후 안전하게 비행하십시오.`;
             } else if (a.isLanded) {
-                message = `${a.id}, 서울 관제입니다. 현재 지상 대기 상태를 확인했습니다. 출발 준비가 되면 보고하십시오.`;
+                message = `${a.id}, ${tower.id}입니다. 지상 대기 확인했습니다. 출발 준비가 되면 보고하십시오.`;
             } else {
-                const nearby = candidates.find(x => x.uid !== target.uid && getDistanceNm(a.lat, a.lng, x.aircraft.lat, x.aircraft.lng) < 60);
-                if (nearby) {
-                    message = `${a.id}, 서울 관제입니다. ${nearby.aircraft.id} 항공기와 인접 교통입니다. 주변 교통을 주의하십시오.`;
-                } else {
-                    message = `${a.id}, 서울 관제입니다. 현재 비행 상태 확인했습니다. 계속 비행하십시오.`;
-                }
+                const nextTower = controlTowerById(a.nextTowerId);
+                message = `${a.id}, ${tower.id}입니다. 현재 비행 상태 확인했습니다. 다음 관제구역은 ${nextTower.id}, 통신 ID ${nextTower.channel}입니다.`;
             }
-            appendRadioMessage(atcBot.id, message, Date.now());
+            appendRadioMessage(tower.id, message, Date.now());
             atcBot.lastTargetId = target.uid;
         }
 
@@ -2255,7 +2371,7 @@
                     const item = document.createElement('div');
                     item.className = `p-1.5 rounded border ${uid === trackedTargetId ? 'bg-emerald-950/80 border-emerald-400' : 'bg-gray-900/50 border-gray-800'} text-gray-300`;
                     const typeLabel = bot.aircraftType === 'FIGHTER' ? 'FTR' : bot.aircraftType === 'HELICOPTER' ? 'HELI' : 'FL';
-                    item.innerHTML = `<div class="flex items-center justify-between gap-2"><span class="font-bold text-emerald-300">🤖 ${bot.id}</span><span class="text-[9px] text-gray-500">${typeLabel}</span></div><div class="text-[9px] text-gray-500 mt-1">ALT ${Math.round(bot.alt || 0).toLocaleString()} FT · ${formatDisplaySpeed(bot.speed || 0)} KT</div><div class="grid grid-cols-2 gap-1 mt-1"><button class="track-btn py-1 rounded bg-cyan-900/50 border border-cyan-500/30 text-cyan-300 text-[9px]">추적</button><button class="board-btn py-1 rounded bg-emerald-900/50 border border-emerald-500/30 text-emerald-300 text-[9px]">탑승</button></div>`;
+                    item.innerHTML = `<div class="flex items-center justify-between gap-2"><span class="font-bold text-emerald-300">🤖 ${bot.id}</span><span class="text-[9px] text-gray-500">${typeLabel}</span></div><div class="text-[9px] text-gray-500 mt-1">ALT ${Math.round(bot.alt || 0).toLocaleString()} FT · ${formatDisplaySpeed(bot.speed || 0)} KT</div><div class="text-[9px] text-amber-300 mt-1">COMM ${bot.atcChannel} · ${bot.currentTowerId || "관제구역"}</div><div class="text-[9px] text-gray-500 mt-0.5">NEXT ${bot.nextTowerId || "---"}</div><div class="grid grid-cols-2 gap-1 mt-1"><button class="track-btn py-1 rounded bg-cyan-900/50 border border-cyan-500/30 text-cyan-300 text-[9px]">${uid === trackedTargetId ? "추적 해제" : "추적"}</button><button class="board-btn py-1 rounded bg-emerald-900/50 border border-emerald-500/30 text-emerald-300 text-[9px]">탑승</button></div>`;
                     item.querySelector('.track-btn').onclick = () => toggleAircraftTracking(uid);
                     item.querySelector('.board-btn').onclick = () => boardBotAircraft(uid);
                     botListEl.appendChild(item);
@@ -2343,6 +2459,8 @@
             const button = document.getElementById('atcBotToggle');
             if (status) { status.textContent = atcBot.enabled ? 'ONLINE' : 'OFFLINE'; status.className = `text-[9px] ${atcBot.enabled ? 'text-emerald-400' : 'text-gray-500'}`; }
             if (button) button.textContent = atcBot.enabled ? '관제봇 끄기' : '관제봇 켜기';
+            const channelEl = document.getElementById('atcBotChannel');
+            if (channelEl) channelEl.textContent = atcBot.channel;
         };
 
         window.sendRadioMessage = async function() {
