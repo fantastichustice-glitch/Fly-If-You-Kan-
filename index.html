@@ -2074,10 +2074,10 @@
             const btn = document.getElementById('btnEmergencyTrigger');
             if (myAircraft.isEmergency) {
                 btn.className = "py-1.5 px-3 bg-red-600 text-white text-xs rounded-lg transition font-medium border border-red-400 animate-pulse flex items-center gap-1";
-                logRadio(myAircraft.id, `[MAYDAY] Squawk 7700 비상 상황 선언!`);
+                // 비상 버튼은 기체 상태만 변경하며 시스템 무전은 전송하지 않습니다.
             } else {
                 btn.className = "py-1.5 px-3 bg-red-600/20 hover:bg-red-600/30 text-red-400 text-xs rounded-lg transition font-medium border border-red-500/40 flex items-center gap-1";
-                logRadio(myAircraft.id, `Squawk 7000 정상 복구.`);
+                // 비상 해제도 시스템 무전을 전송하지 않습니다.
             }
             pushMyStateToFirestore();
         };
@@ -2190,7 +2190,7 @@
             }
 
             try {
-                await setDoc(doc(collection(db, 'servers', serverId, 'radio')), { sender, text, channel: normalizeAtcChannel(atcChannel), timestamp: Date.now() });
+                await setDoc(doc(collection(db, 'servers', serverId, 'radio')), { uid: auth.currentUser.uid, sender, text, channel: normalizeAtcChannel(atcChannel), timestamp: Date.now() });
             } catch (e) {
                 appendRadioMessage(sender, text, Date.now());
             }
